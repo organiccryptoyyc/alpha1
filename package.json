@@ -1,0 +1,25 @@
+{
+  "name": "umbrel-onchain-snapshot-api",
+  "version": "0.1.0",
+  "description": "Metered on-chain data snapshot API. Monetized per-request via the x402 protocol (USDC on Solana). Designed to run as a Docker container on Umbrel and be auto-discovered by AI agents through x402 Bazaar.",
+  "type": "module",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js",
+    "check": "node --check server.js"
+  },
+  "dependencies": {
+    "@coinbase/x402": "^2.1.0",
+    "@x402/core": "^2.20.0",
+    "@x402/express": "^2.20.0",
+    "@x402/extensions": "^2.20.0",
+    "@x402/svm": "^2.20.0",
+    "express": "^4.19.2",
+    "node-cache": "^5.1.2"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "license": "MIT"
+}

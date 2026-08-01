@@ -1,0 +1,18 @@
+services:
+  onchain-snapshot-api:
+    build: .
+    image: umbrel-onchain-snapshot-api:latest
+    container_name: onchain-snapshot-api
+    restart: unless-stopped
+    ports:
+      # Bind only to localhost by default. Put a reverse proxy (Caddy/Nginx
+      # Proxy Manager, both installable from the Umbrel app store) in front
+      # for TLS and a public hostname before you list this anywhere public.
+      - "127.0.0.1:4021:4021"
+    env_file:
+      - .env
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://localhost:4021/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3

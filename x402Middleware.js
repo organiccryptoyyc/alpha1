@@ -4,7 +4,8 @@
 //
 // The old v1 `x402-express` package used here previously is deprecated
 // (security patches only). v2 is a different shape: routes declare a CAIP-2
-// `network` id (e.g. "solana:mainnet") inside an `accepts` entry, schemes are
+// `network` id (e.g. "eip155:8453" for Base, or Solana's genesis-hash-based
+// id — see SOLANA_MAINNET below) inside an `accepts` entry, schemes are
 // registered on an `x402ResourceServer` instance instead of being implicit,
 // and Bazaar discovery is an explicit extension you register and attach per
 // route rather than a boolean flag on the facilitator config.
@@ -54,7 +55,13 @@ const server = new x402ResourceServer(facilitatorClient);
 registerExactSvmScheme(server, { rpcUrl: process.env.SOL_RPC_URL });
 server.registerExtension(bazaarResourceServerExtension);
 
-const SOLANA_MAINNET = "solana:mainnet";
+// CAIP-2 id CDP's facilitator actually advertises for Solana mainnet — a
+// truncated genesis hash, not the human-readable "solana:mainnet" alias
+// used in some SDK docs/migration tables. Using the wrong string here makes
+// the facilitator's getSupported() sync reject every route with
+// "Facilitator does not support scheme 'exact' on network ...".
+// Reference: https://docs.cdp.coinbase.com/x402/network-support
+const SOLANA_MAINNET = "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp";
 
 // Prices are intentionally above the ~$0.00125 combined Solana network fee +
 // CDP facilitator fee ($0.00025 + $0.001 after the first 1,000 free calls/mo)

@@ -22,6 +22,15 @@ import {
 const app = express();
 const PORT = process.env.PORT || 4021;
 
+// Caddy (in front of this container) sets X-Forwarded-Proto: https on every
+// request, but Express ignores forwarded headers by default and falls back
+// to req.protocol === "http". The x402 middleware uses req.protocol to build
+// the "resource.url" field in the 402 challenge (and what ultimately gets
+// registered with Bazaar on settlement) - without this, every resource gets
+// listed as "http://organiccryptoyyc.com:8443/..." instead of "https://...",
+// which the Bazaar catalog appears to silently reject/skip indexing.
+app.set("trust proxy", true);
+
 // Short TTLs: long enough to absorb bursts of agent traffic hitting the same
 // route within a few seconds, short enough that the data stays honest.
 const cache = new NodeCache({ stdTTL: 8, checkperiod: 4 });

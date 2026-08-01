@@ -5,10 +5,12 @@ services:
     container_name: onchain-snapshot-api
     restart: unless-stopped
     ports:
-      # Bind only to localhost by default. Put a reverse proxy (Caddy/Nginx
-      # Proxy Manager, both installable from the Umbrel app store) in front
-      # for TLS and a public hostname before you list this anywhere public.
-      - "127.0.0.1:4021:4021"
+      # Bound to all interfaces so Nginx Proxy Manager (running in its own
+      # container) can reach this service over the host's network. Port 4021
+      # itself is never forwarded through the router - only 80/443 are, and
+      # those point at Nginx Proxy Manager, which terminates TLS and proxies
+      # to this port internally. Do not forward 4021 externally.
+      - "4021:4021"
     # Populated from Portainer's stack-level "Environment variables" UI at
     # deploy time (Repository build method substitutes ${VAR} references
     # here) — no .env file is committed to this repo or needed on the host.

@@ -9,8 +9,17 @@ services:
       # Proxy Manager, both installable from the Umbrel app store) in front
       # for TLS and a public hostname before you list this anywhere public.
       - "127.0.0.1:4021:4021"
-    env_file:
-      - .env
+    # Populated from Portainer's stack-level "Environment variables" UI at
+    # deploy time (Repository build method substitutes ${VAR} references
+    # here) — no .env file is committed to this repo or needed on the host.
+    environment:
+      PAY_TO_ADDRESS: ${PAY_TO_ADDRESS}
+      CDP_API_KEY_ID: ${CDP_API_KEY_ID}
+      CDP_API_KEY_SECRET: ${CDP_API_KEY_SECRET}
+      X402_FACILITATOR_URL: ${X402_FACILITATOR_URL}
+      ETH_RPC_URL: ${ETH_RPC_URL}
+      SOL_RPC_URL: ${SOL_RPC_URL}
+      PORT: ${PORT}
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://localhost:4021/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
       interval: 30s

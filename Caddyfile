@@ -1,3 +1,13 @@
 organiccryptoyyc.com, www.organiccryptoyyc.com {
+	# DNS-01 challenge via acme-dns instead of the default HTTP-01/TLS-ALPN-01.
+	# This home network's router only does symmetric port forwarding (external
+	# port == internal port) and Umbrel's own dashboard already owns host ports
+	# 80/443, so inbound port 80/443 validation can never work here. DNS-01
+	# sidesteps that entirely - no inbound port 80/443 needed at all.
+	# Credentials are generated and stored automatically by entrypoint.sh on
+	# first container start (see caddy.Dockerfile) - never committed to git.
+	tls {
+		dns acmedns /data/acmedns/creds.json
+	}
 	reverse_proxy onchain-snapshot-api:4021
 }

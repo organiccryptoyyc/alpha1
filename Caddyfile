@@ -1,0 +1,3 @@
+organiccryptoyyc.com, www.organiccryptoyyc.com {
+	reverse_proxy onchain-snapshot-api:4021
+}

@@ -11,20 +11,46 @@ services:
       - "4021:4021"
     # Populated from Portainer's stack-level "Environment variables" UI at
     # deploy time (Repository build method substitutes ${VAR} references
-    # here) — no .env file is committed to this repo or needed on the host.
+    # here) - no .env file is committed to this repo or needed on the host.
     environment:
       PAY_TO_ADDRESS: ${PAY_TO_ADDRESS}
       CDP_API_KEY_ID: ${CDP_API_KEY_ID}
       CDP_API_KEY_SECRET: ${CDP_API_KEY_SECRET}
       X402_FACILITATOR_URL: ${X402_FACILITATOR_URL}
       ETH_RPC_URL: ${ETH_RPC_URL}
-      SOL_RPC_URL: ${SOL_RPC_URL}
+      # Points at the local caching proxy below, NOT the real Solana RPC
+      # directly. See sol-rpc-cache.mjs for why: @x402/svm 2.20.0 refetches
+      # a brand new blockhash on every single request (including the internal
+      # re-check of a client's payment retry), and @x402/core's matching
+      # logic requires that blockhash to match exactly - so without this
+      # cache, real payments fail almost every time with "No matching
+      # payment requirements", even with a fully funded wallet.
+      SOL_RPC_URL: http://sol-rpc-cache:3000
       PORT: ${PORT}
+    depends_on:
+      - sol-rpc-cache
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://localhost:4021/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
       interval: 30s
       timeout: 5s
       retries: 3
+
+  sol-rpc-cache:
+    # Caching reverse-proxy in front of the real Solana RPC endpoint. Only
+    # exists to work around a race condition in @x402/svm 2.20.0 - see
+    # sol-rpc-cache.mjs for the full explanation. Not reachable from outside
+    # the docker network; no ports are published to the host.
+    build:
+      context: .
+      dockerfile: sol-rpc-cache.Dockerfile
+    image: umbrel-onchain-snapshot-sol-rpc-cache:latest
+    container_name: onchain-snapshot-sol-rpc-cache
+    restart: unless-stopped
+    environment:
+      # Reuses the same Portainer stack variable the api service used to
+      # point straight at - no new variable needs to be added in Portainer.
+      UPSTREAM_RPC_URL: ${SOL_RPC_URL}
+      PORT: "3000"
 
   caddy:
     # Terminates TLS and reverse-proxies to onchain-snapshot-api over the

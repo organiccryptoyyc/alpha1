@@ -5,11 +5,9 @@ services:
     container_name: onchain-snapshot-api
     restart: unless-stopped
     ports:
-      # Bound to all interfaces so Nginx Proxy Manager (running in its own
-      # container) can reach this service over the host's network. Port 4021
-      # itself is never forwarded through the router - only 80/443 are, and
-      # those point at Nginx Proxy Manager, which terminates TLS and proxies
-      # to this port internally. Do not forward 4021 externally.
+      # Bound to all interfaces so other containers (e.g. the caddy service
+      # below) and the LAN can reach this directly for debugging. Not
+      # forwarded through the router - only 8080/8443 (caddy) are.
       - "4021:4021"
     # Populated from Portainer's stack-level "Environment variables" UI at
     # deploy time (Repository build method substitutes ${VAR} references
@@ -27,3 +25,31 @@ services:
       interval: 30s
       timeout: 5s
       retries: 3
+
+  caddy:
+    # Terminates TLS and reverse-proxies to onchain-snapshot-api over the
+    # docker-internal network. Published on 8080/8443 instead of the
+    # standard 80/443 because Umbrel's own dashboard already owns host
+    # ports 80/443, and Umbrel's official Nginx Proxy Manager app is fixed
+    # to host ports 40080/40443 - which happens to fall inside a port range
+    # this ISP's router blocks for forwarding. 8080/8443 avoid both
+    # conflicts. The router forwards external 80->8080 and 443->8443; Caddy
+    # itself is unaware of this remap and requests/renews Let's Encrypt
+    # certs normally since, from the ACME CA's perspective, it's still
+    # talking to ports 80/443 on the public IP.
+    image: caddy:2-alpine
+    container_name: onchain-snapshot-caddy
+    restart: unless-stopped
+    ports:
+      - "8080:80"
+      - "8443:443"
+    volumes:
+      - caddy_data:/data
+      - caddy_config:/config
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+    depends_on:
+      - onchain-snapshot-api
+
+volumes:
+  caddy_data:
+  caddy_config:

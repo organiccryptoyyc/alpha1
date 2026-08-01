@@ -37,7 +37,10 @@ services:
     # itself is unaware of this remap and requests/renews Let's Encrypt
     # certs normally since, from the ACME CA's perspective, it's still
     # talking to ports 80/443 on the public IP.
-    image: caddy:2-alpine
+    build:
+      context: .
+      dockerfile: caddy.Dockerfile
+    image: umbrel-onchain-snapshot-caddy:latest
     container_name: onchain-snapshot-caddy
     restart: unless-stopped
     ports:
@@ -46,7 +49,6 @@ services:
     volumes:
       - caddy_data:/data
       - caddy_config:/config
-      - ./Caddyfile:/etc/caddy/Caddyfile:ro
     depends_on:
       - onchain-snapshot-api
 

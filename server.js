@@ -18,6 +18,7 @@ import {
   getSolBalance,
   getTokenPrice,
   getPoktServiceDemand,
+  getUprockFetch,
 } from "./dataSources.js";
 
 const app = express();
@@ -100,6 +101,20 @@ app.get("/v1/pokt/service-demand", async (req, res, next) => {
   try {
     const limit = req.query.limit;
     res.json(await cached(`pokt:demand:${limit || 10}`, 60, () => getPoktServiceDemand(limit)));
+  } catch (err) {
+    next(err);
+  }
+});
+
+// UpRock real-device fetch. Longer TTL (180s) than everything else on
+// purpose: each crawl job costs real UpRock credits, so a repeat request for
+// the same URL inside the cache window is free margin instead of a repeat
+// charge against your UpRock balance.
+app.get("/v1/uprock/fetch", async (req, res, next) => {
+  try {
+    const { url } = req.query;
+    if (!url) return res.status(400).json({ error: "url query param is required" });
+    res.json(await cached(`uprock:${url}`, 180, () => getUprockFetch(url)));
   } catch (err) {
     next(err);
   }

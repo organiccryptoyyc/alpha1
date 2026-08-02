@@ -182,3 +182,108 @@ export async function getPoktServiceDemand(limit = 10) {
     fetchedAt: new Date().toISOString(),
   };
 }
+
+// --- UpRock real-device web fetch ------------------------------------------
+// Sourced from UpRock's residential/mobile device network (edge.uprock.com,
+// verified against their live API docs). UNLIKE everything else in this
+// file, this is NOT free: UpRock bills in credits ($0.006/credit on paid
+// tiers, first 5,000 credits/month free), so every call here has a real
+// upstream cost, not just the Solana/facilitator fee. That changes the price
+// floor math -- see the PLACEHOLDER note in x402Middleware.js.
+//
+// Requires UPROCK_API_KEY. Sign up free at https://uprock.ai (no credit
+// card for the free tier) and grab a key from the dashboard -- see
+// https://uprock.ai/docs/guides/getting-started/01-api_keys.
+//
+// What this sells: a URL fetched through an actual residential/mobile
+// device somewhere in the world, so you get what a real user in that
+// location sees -- not a datacenter-IP view that trips anti-bot defenses or
+// gets geo-filtered content. That's UpRock's own core value prop, not a
+// derived metric, so the value-add here is "who fetched it."
+const UPROCK_BASE_URL = process.env.UPROCK_BASE_URL || "https://edge.uprock.com";
+const UPROCK_API_KEY = process.env.UPROCK_API_KEY;
+
+async function uprockRequest(path, options = {}) {
+  const res = await fetch(`${UPROCK_BASE_URL}${path}`, {
+    ...options,
+    headers: {
+      "content-type": "application/json",
+      ...(UPROCK_API_KEY ? { authorization: `Bearer ${UPROCK_API_KEY}` } : {}),
+      ...options.headers,
+    },
+  });
+  const json = await res.json().catch(() => null);
+  if (!res.ok) {
+    const detail = typeof json === "string" ? json : JSON.stringify(json ?? {});
+    throw new Error(`UpRock ${path} failed: HTTP ${res.status} ${detail}`.trim());
+  }
+  return json;
+}
+
+// Crawl jobs are async on UpRock's side: submit -> poll status -> download
+// result. We poll inside this one function so every caller in this project
+// still gets the same synchronous shape as every other data-source function
+// here -- it just means this particular call takes as long as the real
+// device takes to fetch the page (typically a few seconds), bounded by
+// maxWaitMs so a slow/stuck device can't hang an x402 request forever.
+async function uprockCrawl(targetUrl, { timeoutSec = 20, maxWaitMs = 20000, pollMs = 1000 } = {}) {
+  if (!UPROCK_API_KEY) {
+    throw new Error("UPROCK_API_KEY is not set -- sign up free at https://uprock.ai to get one");
+  }
+
+  const job = await uprockRequest("/crawl/v1/new", {
+    method: "POST",
+    body: JSON.stringify({ url: targetUrl, method: "GET", timeout_sec: timeoutSec }),
+  });
+
+  const jobId = job.job_id;
+  let status = job.status;
+  const deadline = Date.now() + maxWaitMs;
+
+  while (status !== "completed" && Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, pollMs));
+    const check = await uprockRequest(`/crawl/v1/status/${jobId}`);
+    status = check.status;
+    if (status === "failed" || status === "error") {
+      throw new Error(`UpRock crawl job ${jobId} failed`);
+    }
+  }
+
+  if (status !== "completed") {
+    throw new Error(
+      `UpRock crawl job ${jobId} did not complete within ${maxWaitMs}ms (last status: ${status})`
+    );
+  }
+
+  const result = await uprockRequest(`/crawl/v1/jobs/${jobId}/download`);
+  return { jobId, result };
+}
+
+export async function getUprockFetch(targetUrl) {
+  if (!targetUrl) throw new Error("url query param is required");
+  let parsed;
+  try {
+    parsed = new URL(targetUrl);
+  } catch {
+    throw new Error("url must be a valid absolute URL, e.g. https://example.com");
+  }
+  if (!["http:", "https:"].includes(parsed.protocol)) {
+    throw new Error("url must use http or https");
+  }
+
+  const { jobId, result } = await uprockCrawl(parsed.toString());
+  // readerContent is UpRock's cleaned "reader mode" extraction (ads/nav
+  // stripped); fall back to raw body if a given page didn't produce one.
+  // Capped at 20k chars so one giant page doesn't blow up the response.
+  const content = (result?.readerContent || result?.mainResult?.body || "").slice(0, 20000);
+
+  return {
+    source: "uprock-real-device",
+    jobId,
+    url: parsed.toString(),
+    statusCode: result?.mainResult?.statusCode ?? null,
+    success: result?.mainResult?.success ?? null,
+    content,
+    fetchedAt: new Date().toISOString(),
+  };
+}

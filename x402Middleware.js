@@ -160,6 +160,38 @@ export const routes = {
       },
     }),
   },
+  // Unlike every other route here, this one has a real per-call upstream
+  // cost (UpRock credits, $0.006/credit after the first 5,000 free
+  // credits/month). Actual credits-per-crawl-job was never confirmed against
+  // a live test call, so $0.10 is set with a deliberate safety margin above
+  // a worst-case ~$0.06 cost estimate (10 credits/job) rather than a
+  // verified number -- revisit once real production usage shows the actual
+  // credit burn per call.
+  "GET /v1/uprock/fetch": {
+    accepts: { scheme: "exact", payTo: PAY_TO_ADDRESS, price: "$0.10", network: SOLANA_MAINNET },
+    description:
+      "Fetch any URL through a real residential/mobile device (UpRock's network, 190+ " +
+      "countries) instead of a datacenter IP -- returns the page as an actual user in that " +
+      "location would see it, bypassing anti-bot blocking and geo-filtered content.",
+    extensions: declareDiscoveryExtension({
+      input: { url: "https://example.com" },
+      inputSchema: {
+        properties: {
+          url: { type: "string", description: "Absolute URL to fetch (http or https)" },
+        },
+        required: ["url"],
+      },
+      output: {
+        example: {
+          source: "uprock-real-device",
+          url: "https://example.com",
+          statusCode: 200,
+          success: true,
+          content: "Example Domain...",
+        },
+      },
+    }),
+  },
 };
 
 export function buildX402Middleware() {

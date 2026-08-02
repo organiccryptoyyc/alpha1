@@ -161,12 +161,12 @@ export const routes = {
     }),
   },
   // Unlike every other route here, this one has a real per-call upstream
-  // cost (UpRock credits, $0.006/credit after the first 5,000 free
-  // credits/month). Actual credits-per-crawl-job was never confirmed against
-  // a live test call, so $0.10 is set with a deliberate safety margin above
-  // a worst-case ~$0.06 cost estimate (10 credits/job) rather than a
-  // verified number -- revisit once real production usage shows the actual
-  // credit burn per call.
+  // cost: confirmed with the UpRock team at ~2-3 credits per crawl fetch,
+  // i.e. ~$0.012-$0.018 at $0.006/credit after the first 5,000 free
+  // credits/month (200/day). $0.10 leaves ~85-88% margin -- priced on
+  // value/differentiation (real-device fetch), not cost-plus, so no need to
+  // chase the cost floor down. Note the ~65-100 calls/day free-tier ceiling
+  // before UpRock billing shifts to per-credit overage.
   "GET /v1/uprock/fetch": {
     accepts: { scheme: "exact", payTo: PAY_TO_ADDRESS, price: "$0.10", network: SOLANA_MAINNET },
     description:

@@ -100,3 +100,85 @@ export async function getTokenPrice(symbol) {
     fetchedAt: new Date().toISOString(),
   };
 }
+
+// --- POKT Shannon service-demand snapshot ---------------------------------
+// Sourced live from Pocket Network's public GraphQL indexer (Pocketdex).
+// This is deliberately NOT a price/RPC pass-through like everything above —
+// it sells relay-demand signal: which services (chains/APIs) are seeing the
+// most relay volume on the Shannon network right now, which way that's
+// trending, and how many suppliers are already competing to serve it. That
+// makes it useful to gateway operators and suppliers deciding where to
+// stake, not just to agents doing a routine lookup.
+//
+// Per pocket-engineering discipline: nothing here is hardcoded. Every field
+// is queried fresh from the indexer on each (cache-bounded) call.
+const POKT_GRAPHQL_URL = process.env.POKT_GRAPHQL_URL || "https://data.pocket.network/graphql";
+
+async function poktGraphQL(query, variables = {}) {
+  const res = await fetch(POKT_GRAPHQL_URL, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ query, variables }),
+  });
+  if (!res.ok) throw new Error(`POKT indexer failed: HTTP ${res.status}`);
+  const json = await res.json();
+  if (json.errors?.length) {
+    throw new Error(`POKT indexer error: ${json.errors[0].message}`);
+  }
+  return json.data;
+}
+
+const SERVICE_DEMAND_QUERY = `
+  query ServiceDemand($first: Int!) {
+    services(
+      first: $first
+      orderBy: NEW_NUM_RELAYS_EMA_DESC
+      filter: { newNumRelaysEma: { greaterThan: "0" } }
+    ) {
+      nodes {
+        id
+        name
+        computeUnitsPerRelay
+        newNumRelaysEma
+        prevNumRelaysEma
+        supplierServiceConfigs {
+          totalCount
+        }
+      }
+    }
+  }
+`;
+
+export async function getPoktServiceDemand(limit = 10) {
+  // Bounded, never unbounded — Three S Framework (Scalability).
+  const capped = Math.max(1, Math.min(Number(limit) || 10, 25));
+  const data = await poktGraphQL(SERVICE_DEMAND_QUERY, { first: capped });
+  const nodes = data?.services?.nodes ?? [];
+
+  const services = nodes.map((s) => {
+    const prev = Number(s.prevNumRelaysEma);
+    const cur = Number(s.newNumRelaysEma);
+    const pctChange = prev > 0 ? ((cur - prev) / prev) * 100 : null;
+    const trend =
+      pctChange === null ? "unknown" : pctChange > 1 ? "rising" : pctChange < -1 ? "falling" : "flat";
+    return {
+      serviceId: s.id,
+      name: s.name,
+      computeUnitsPerRelay: Number(s.computeUnitsPerRelay),
+      relayVolumeEma: cur,
+      prevRelayVolumeEma: prev,
+      trend,
+      pctChange: pctChange === null ? null : Number(pctChange.toFixed(2)),
+      activeSuppliers: s.supplierServiceConfigs?.totalCount ?? 0,
+    };
+  });
+
+  return {
+    network: "pocket-shannon",
+    source: "data.pocket.network/graphql",
+    rankedBy: "relayVolumeEma",
+    limit: capped,
+    services,
+    fetchedAt: new Date().toISOString(),
+  };
+}

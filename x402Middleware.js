@@ -121,6 +121,45 @@ export const routes = {
       output: { example: { chain: "eth", address: "0x...", eth: 1.2345 } },
     }),
   },
+  // Niche, higher-margin route: live Pocket Network Shannon relay-demand
+  // ranking, not another RPC/price pass-through. Priced above the RPC routes
+  // because it's not commodity data — nothing else on Bazaar sells "which
+  // services are seeing the most relay volume right now," and the buyer
+  // (gateway/supplier operators deciding where to stake) has higher intent
+  // than a generic lookup agent.
+  "GET /v1/pokt/service-demand": {
+    accepts: { scheme: "exact", payTo: PAY_TO_ADDRESS, price: "$0.03", network: SOLANA_MAINNET },
+    description:
+      "Live Pocket Network (Shannon) relay-demand ranking: which services/chains are seeing " +
+      "the most relay volume right now, trend vs. the prior EMA window, and active supplier " +
+      "count per service. Sourced live from the public Pocketdex GraphQL indexer, never cached " +
+      "beyond 60s.",
+    extensions: declareDiscoveryExtension({
+      input: { limit: "10" },
+      inputSchema: {
+        properties: {
+          limit: { type: "string", description: "Number of top services to return, 1-25 (default 10)" },
+        },
+      },
+      output: {
+        example: {
+          network: "pocket-shannon",
+          rankedBy: "relayVolumeEma",
+          services: [
+            {
+              serviceId: "eth",
+              name: "Ethereum",
+              relayVolumeEma: 12345,
+              prevRelayVolumeEma: 11800,
+              trend: "rising",
+              pctChange: 4.62,
+              activeSuppliers: 812,
+            },
+          ],
+        },
+      },
+    }),
+  },
 };
 
 export function buildX402Middleware() {

@@ -17,19 +17,11 @@ import {
   getEthBalance,
   getSolBalance,
   getTokenPrice,
+  getPoktServiceDemand,
 } from "./dataSources.js";
 
 const app = express();
 const PORT = process.env.PORT || 4021;
-
-// Caddy (in front of this container) sets X-Forwarded-Proto: https on every
-// request, but Express ignores forwarded headers by default and falls back
-// to req.protocol === "http". The x402 middleware uses req.protocol to build
-// the "resource.url" field in the 402 challenge (and what ultimately gets
-// registered with Bazaar on settlement) - without this, every resource gets
-// listed as "http://organiccryptoyyc.com:8443/..." instead of "https://...",
-// which the Bazaar catalog appears to silently reject/skip indexing.
-app.set("trust proxy", true);
 
 // Short TTLs: long enough to absorb bursts of agent traffic hitting the same
 // route within a few seconds, short enough that the data stays honest.
@@ -95,6 +87,19 @@ app.get("/v1/wallet/balance/:chain/:address", async (req, res, next) => {
         : null;
     if (!fn) return res.status(400).json({ error: "chain must be 'eth' or 'sol'" });
     res.json(await cached(key, 6, fn));
+  } catch (err) {
+    next(err);
+  }
+});
+
+// POKT Shannon relay-demand ranking. Longer TTL (60s) than the RPC routes
+// above — the underlying EMA only moves meaningfully on the order of tens of
+// seconds to minutes, so a tighter cache would just burn indexer load for no
+// fresher data.
+app.get("/v1/pokt/service-demand", async (req, res, next) => {
+  try {
+    const limit = req.query.limit;
+    res.json(await cached(`pokt:demand:${limit || 10}`, 60, () => getPoktServiceDemand(limit)));
   } catch (err) {
     next(err);
   }

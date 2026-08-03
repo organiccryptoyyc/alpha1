@@ -71,19 +71,43 @@ const facilitatorClient = new HTTPFacilitatorClient(facilitator);
 // FacilitatorConfig's optional createAuthHeaders. Kept behind an env var so
 // it can be swapped without a code change if peaq documents a different
 // facilitator later.
+//
+// IMPORTANT: registered ONLY when PEAQ_PAY_TO_ADDRESS is actually set, not
+// unconditionally. A same-night production incident showed why: simply
+// adding a second facilitator to the array below — even with zero routes
+// advertising peaq in `accepts` — broke real Solana settlements on the
+// higher-priced routes (pokt-service-demand, uprock-fetch). PayAI's own
+// /supported response lists our exact Solana network too, and once it's
+// registered the SDK apparently considers it a candidate for verify/settle
+// on every Solana payment, not just peaq ones. Root cause not fully
+// isolated (PayAI may cap sponsored-gas amounts, or facilitator selection
+// among an array behaves differently than a single client) -- but the safe,
+// conservative fix is: don't register a facilitator we're not using yet.
+// Also confirmed PayAI genuinely does NOT support eip155:3338 (peaq) in its
+// live /supported response despite peaq's docs claiming it does, so this
+// stays unused until a working peaq facilitator is found anyway.
 const PAYAI_FACILITATOR_URL = process.env.PAYAI_FACILITATOR_URL || "https://facilitator.payai.network";
-const peaqFacilitatorClient = new HTTPFacilitatorClient({ url: PAYAI_FACILITATOR_URL });
+// Reuses the PEAQ_PAY_TO_ADDRESS declared above -- one source of truth for
+// "is peaq actually active" instead of re-reading the env var here.
+const PEAQ_PAY_TO_ADDRESS_SET = Boolean(PEAQ_PAY_TO_ADDRESS);
 
-// One resource server per process, backed by BOTH facilitators at once —
-// x402ResourceServer's constructor accepts a single client or an array.
-// Register the Solana "exact" scheme (SPL/USDC transfers), the EVM "exact"
-// scheme scoped to peaq only (not a blanket eip155:* wildcard — we don't
-// want to silently advertise support for other EVM chains this facilitator
-// setup was never tested against), and the Bazaar discovery extension once,
-// then reuse this one server instance for every route below.
-const server = new x402ResourceServer([facilitatorClient, peaqFacilitatorClient]);
+// One resource server per process. Only add PayAI to the facilitator array
+// once peaq is actually wired up (see note above) -- otherwise this is
+// exactly the single-facilitator (CDP) setup already proven working in
+// production. Register the Solana "exact" scheme (SPL/USDC transfers)
+// unconditionally, the EVM "exact" scheme scoped to peaq only (not a
+// blanket eip155:* wildcard) ONLY when peaq is active, and the Bazaar
+// discovery extension once, then reuse this one server instance for every
+// route below.
+const server = new x402ResourceServer(
+  PEAQ_PAY_TO_ADDRESS_SET
+    ? [facilitatorClient, new HTTPFacilitatorClient({ url: PAYAI_FACILITATOR_URL })]
+    : facilitatorClient
+);
 registerExactSvmScheme(server, { rpcUrl: process.env.SOL_RPC_URL });
-registerExactEvmScheme(server, { networks: ["eip155:3338"] });
+if (PEAQ_PAY_TO_ADDRESS_SET) {
+  registerExactEvmScheme(server, { networks: ["eip155:3338"] });
+}
 server.registerExtension(bazaarResourceServerExtension);
 
 // CAIP-2 id CDP's facilitator actually advertises for Solana mainnet — a

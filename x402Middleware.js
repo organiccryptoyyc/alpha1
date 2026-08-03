@@ -72,68 +72,70 @@ if (!process.env.CDP_API_KEY_ID || !process.env.CDP_API_KEY_SECRET) {
 }
 const facilitatorClient = new HTTPFacilitatorClient(facilitator);
 
-// PayAI's hosted facilitator is peaq's officially documented x402
-// facilitator (https://docs.peaq.xyz — x402 integration guide). Unlike CDP's
-// facilitator it doesn't require API key auth for verify/settle, matching
-// FacilitatorConfig's optional createAuthHeaders. Kept behind an env var so
-// it can be swapped without a code change if peaq documents a different
-// facilitator later.
+// Self-hosted peaq facilitator (peaq-facilitator.js, deployed as its own
+// docker-compose service). Replaces PayAI, which was confirmed (live
+// /supported check, prior session) to NOT actually advertise eip155:3338
+// support despite peaq's own docs naming it as peaq's official facilitator.
+// peaq's published reference facilitator (github.com/peaqnetwork/x402-peaq)
+// couldn't be pointed to directly either -- it's pinned to the OLDER
+// pre-v2 `x402` package (v0.7), advertising x402Version 1 and a bare
+// `network: "peaq"` string rather than the v2 CAIP-2 `"eip155:3338"` this
+// server speaks. peaq-facilitator.js is a from-scratch v2-native rebuild
+// using @x402/core/facilitator + @x402/evm/exact/facilitator instead --
+// see that file's header comment for the full detail on why and how.
+//
+// STATUS as of 2026-08-03: built and staged, NOT yet live-tested against a
+// real payment. Needs a dedicated peaq wallet funded with native PEAQ (for
+// this facilitator's own gas) before a real settle can be confirmed. Until
+// FACILITATOR_PRIVATE_KEY is set on the peaq-facilitator service, it idles
+// with an empty /supported list, so it's safe to have deployed already.
 //
 // IMPORTANT: registered ONLY when PEAQ_PAY_TO_ADDRESS is actually set, not
-// unconditionally. A same-night production incident showed why: simply
-// adding a second facilitator to the array below — even with zero routes
-// advertising peaq in `accepts` — broke real Solana settlements on the
-// higher-priced routes (pokt-service-demand, uprock-fetch). PayAI's own
-// /supported response lists our exact Solana network too, and once it's
-// registered the SDK apparently considers it a candidate for verify/settle
-// on every Solana payment, not just peaq ones. Root cause not fully
-// isolated (PayAI may cap sponsored-gas amounts, or facilitator selection
-// among an array behaves differently than a single client) -- but the safe,
-// conservative fix is: don't register a facilitator we're not using yet.
-// Also confirmed PayAI genuinely does NOT support eip155:3338 (peaq) in its
-// live /supported response despite peaq's docs claiming it does, so this
-// stays unused until a working peaq facilitator is found anyway.
+// unconditionally. A same-night production incident (prior session, with
+// PayAI as the second facilitator) showed why: simply adding a second
+// facilitator to the array below — even with zero routes advertising peaq in
+// `accepts` — appeared to break real Solana settlements on the higher-priced
+// routes (pokt-service-demand, uprock-fetch). Root cause not fully isolated;
+// see the TODO below for the leading alternative explanation. Regardless of
+// which it was, the safe, conservative fix stands: don't register a
+// facilitator we're not using yet.
 //
-// TODO (next patch that touches this file): the "second facilitator broke
-// Solana settlement" theory above was re-examined overnight 2026-08-02 by
-// reading the actual @x402/core source, and it doesn't hold up -- facilitator
-// selection is deterministic (first array entry wins per network+scheme) and
-// has no concept of price, but the failures only ever hit the two highest
-// price tiers ($0.03/$0.10). That pattern matches a simple insufficient-
-// USDC-balance-in-the-test-wallet explanation exactly as well, which is what
-// the SECOND "1/11 paid" regression was later confirmed to actually be, via
-// Solscan. CONFIRM which one it really was next time this file is touched:
-// on a non-prod branch, temporarily make BOTH facilitators + the EVM scheme
-// unconditional again (remove the PEAQ_PAY_TO_ADDRESS_SET guards below), top
-// the test wallet up well above $0.20, and run test-all-routes.mjs. 11/11 =
-// the theory above was wrong and this conditional gating never fixed a real
-// bug (still fine to keep as defensive practice). Any $0.03/$0.10 failure
-// even with ample funds = there's a real amount-dependent bug worth chasing.
-//
-// If/when peaq is reactivated: do NOT reach for PayAI again, they still
-// don't support peaq. Use peaq's own self-hosted reference facilitator
-// instead (github.com/peaqnetwork/x402-peaq) -- but port it to @x402/core +
-// @x402/evm v2 first. Their reference code targets the OLDER x402-foundation
-// SDK (`x402`/`x402-types` packages, prices as `network: "peaq"` not CAIP-2
-// `"eip155:3338"`), which is a different protocol-version surface than what
-// this server runs on -- confirm it actually speaks x402Version 2 /
-// PAYMENT-SIGNATURE headers before wiring it in, not just copy-paste it.
-const PAYAI_FACILITATOR_URL = process.env.PAYAI_FACILITATOR_URL || "https://facilitator.payai.network";
+// TODO (next patch that touches this file, and definitely before the first
+// real peaq settle test): the "second facilitator broke Solana settlement"
+// theory above was re-examined overnight 2026-08-02 by reading the actual
+// @x402/core source, and it doesn't hold up -- facilitator selection is
+// deterministic (first array entry wins per network+scheme) and has no
+// concept of price, but the failures only ever hit the two highest price
+// tiers ($0.03/$0.10). That pattern matches a simple insufficient-USDC-
+// balance-in-the-test-wallet explanation exactly as well, which is what the
+// SECOND "1/11 paid" regression was later confirmed to actually be, via
+// Solscan. This is now doubly important to settle before flipping
+// PEAQ_PAY_TO_ADDRESS on for real, since doing so re-introduces the exact
+// "second facilitator in the array" condition implicated above. CONFIRM
+// which explanation it really was: on a non-prod branch, temporarily make
+// both facilitators + the EVM scheme unconditional again (remove the
+// PEAQ_PAY_TO_ADDRESS_SET guards below), top the test wallet up well above
+// $0.20, and run test-all-routes.mjs. 11/11 = the theory above was wrong and
+// this conditional gating never fixed a real bug (still fine to keep as
+// defensive practice). Any $0.03/$0.10 failure even with ample funds =
+// there's a real amount-dependent bug worth chasing -- and this time it'd
+// need chasing with peaq-facilitator.js as a suspect too, not just PayAI.
+const PEAQ_FACILITATOR_URL = process.env.PEAQ_FACILITATOR_URL || "http://peaq-facilitator:3333";
 // Reuses the PEAQ_PAY_TO_ADDRESS declared above -- one source of truth for
 // "is peaq actually active" instead of re-reading the env var here.
 const PEAQ_PAY_TO_ADDRESS_SET = Boolean(PEAQ_PAY_TO_ADDRESS);
 
-// One resource server per process. Only add PayAI to the facilitator array
-// once peaq is actually wired up (see note above) -- otherwise this is
-// exactly the single-facilitator (CDP) setup already proven working in
-// production. Register the Solana "exact" scheme (SPL/USDC transfers)
+// One resource server per process. Only add the self-hosted peaq facilitator
+// to the array once peaq is actually wired up (see note above) -- otherwise
+// this is exactly the single-facilitator (CDP) setup already proven working
+// in production. Register the Solana "exact" scheme (SPL/USDC transfers)
 // unconditionally, the EVM "exact" scheme scoped to peaq only (not a
 // blanket eip155:* wildcard) ONLY when peaq is active, and the Bazaar
 // discovery extension once, then reuse this one server instance for every
 // route below.
 const server = new x402ResourceServer(
   PEAQ_PAY_TO_ADDRESS_SET
-    ? [facilitatorClient, new HTTPFacilitatorClient({ url: PAYAI_FACILITATOR_URL })]
+    ? [facilitatorClient, new HTTPFacilitatorClient({ url: PEAQ_FACILITATOR_URL })]
     : facilitatorClient
 );
 registerExactSvmScheme(server, { rpcUrl: process.env.SOL_RPC_URL });

@@ -50,7 +50,14 @@ services:
       # facilitator (peaq's officially documented x402 facilitator) if unset.
       PEAQ_PAY_TO_ADDRESS: ${PEAQ_PAY_TO_ADDRESS}
       PEAQ_RPC_URL: ${PEAQ_RPC_URL}
-      PAYAI_FACILITATOR_URL: ${PAYAI_FACILITATOR_URL}
+      # Self-hosted facilitator (see peaq-facilitator.js) -- replaces PayAI,
+      # which never actually advertised eip155:3338 support despite peaq's
+      # docs. Internal-only, reached by service name over the docker
+      # network; not published to the host or the internet. Optional, same
+      # as PEAQ_RPC_URL above -- x402Middleware.js defaults it to
+      # http://peaq-facilitator:3333 (the service below) in code, so this
+      # only needs setting in Portainer if you point it somewhere else.
+      PEAQ_FACILITATOR_URL: ${PEAQ_FACILITATOR_URL}
     depends_on:
       - sol-rpc-cache
     healthcheck:
@@ -75,6 +82,34 @@ services:
       # point straight at - no new variable needs to be added in Portainer.
       UPSTREAM_RPC_URL: ${SOL_RPC_URL}
       PORT: "3000"
+
+  peaq-facilitator:
+    # Self-hosted x402 v2 facilitator for peaq (chain ID 3338) -- see
+    # peaq-facilitator.js for the full "why" (short version: neither CDP nor
+    # PayAI support this network). Internal-only, same pattern as
+    # sol-rpc-cache below: no ports published to the host, reachable from
+    # onchain-snapshot-api only by its service name over the docker network.
+    # Boots fine with no FACILITATOR_PRIVATE_KEY set (idles with an empty
+    # supported list instead of crash-looping) -- safe to deploy this
+    # service before a funded wallet exists, then activate it later by
+    # setting FACILITATOR_PRIVATE_KEY in Portainer and redeploying.
+    build:
+      context: .
+      dockerfile: peaq-facilitator.Dockerfile
+    image: umbrel-onchain-snapshot-peaq-facilitator:latest
+    container_name: onchain-snapshot-peaq-facilitator
+    restart: unless-stopped
+    environment:
+      # The wallet that SUBMITS settlement transactions and pays their gas
+      # on peaq -- separate from PEAQ_PAY_TO_ADDRESS above, which only
+      # RECEIVES payments and never signs anything. Leave unset until you
+      # have a dedicated peaq wallet funded with a small amount of native
+      # PEAQ for gas; this service runs fine either way.
+      FACILITATOR_PRIVATE_KEY: ${FACILITATOR_PRIVATE_KEY}
+      # Reuses the same Portainer stack variable the api service reads --
+      # no separate variable needed for this service.
+      PEAQ_RPC_URL: ${PEAQ_RPC_URL}
+      PORT: "3333"
 
   caddy:
     # Terminates TLS and reverse-proxies to onchain-snapshot-api over the

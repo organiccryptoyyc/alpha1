@@ -120,6 +120,72 @@ export async function getPeaqBalance(address) {
   };
 }
 
+// --- peaq machine verification (peaqOS MCR API) -----------------------------
+// Sourced from peaq's own public, read-only Machine Credit Rating API
+// (https://mcr.peaq.xyz). No API key required -- all data originates from
+// on-chain contracts on peaq chain (chain ID 3338): IdentityRegistry (is
+// this machine registered/bonded), AdminFlags (negative_flag), and the
+// EventRegistry-derived MCR score/rating.
+//
+// Deliberately NOT built on the raw DID precompile (0x...800) -- peaq's own
+// docs flag that as absorbed into peaqOS/peaqID, with this MCR API as the
+// current, documented surface. Verified live against a real registered
+// machine (machine_id 1) before shipping: /health returned {"status":"ok"},
+// and /mcr/<real DID> returned the exact documented shape.
+//
+// Rate limit on peaq's side: 90 req/min per IP, MCR_CACHE_TTL defaults to
+// 3600s upstream -- so our own cache TTL below doesn't need to be tight.
+const PEAQOS_MCR_API_URL = process.env.PEAQOS_MCR_API_URL || "https://mcr.peaq.xyz";
+
+// Accepts either a full peaq DID ("did:peaq:0x...") or a raw EVM address
+// ("0x...") -- the MCR API supports both, but we normalize to the full DID
+// form before calling so the response's own `did` field is always present.
+function normalizePeaqDid(input) {
+  const trimmed = String(input || "").trim();
+  const addr = trimmed.startsWith("did:peaq:") ? trimmed.slice("did:peaq:".length) : trimmed;
+  if (!/^0x[a-fA-F0-9]{40}$/.test(addr)) {
+    throw new Error("machine id must be a peaq DID (did:peaq:0x...) or a raw 0x address");
+  }
+  return `did:peaq:${addr}`;
+}
+
+export async function getPeaqMachineVerification(didOrAddress) {
+  const did = normalizePeaqDid(didOrAddress);
+  const res = await fetch(`${PEAQOS_MCR_API_URL}/mcr/${did}`);
+
+  // "Not registered" is a legitimate, valuable answer for a verifier bot
+  // (like a credit check coming back "no record") -- not an upstream
+  // failure, so it's a normal 200 response here, not a thrown error.
+  if (res.status === 404) {
+    return { source: "peaqos-mcr", did, registered: false, fetchedAt: new Date().toISOString() };
+  }
+
+  const json = await res.json().catch(() => null);
+  if (!res.ok) {
+    const detail = json?.detail || `HTTP ${res.status}`;
+    throw new Error(`peaqOS MCR lookup failed for ${did}: ${detail}`);
+  }
+
+  return {
+    source: "peaqos-mcr",
+    registered: true,
+    did: json.did,
+    machineId: json.machine_id,
+    creditRating: json.mcr,
+    creditScore: json.mcr_score,
+    ratingDegraded: json.mcr_degraded,
+    bondStatus: json.bond_status,
+    negativeFlag: json.negative_flag,
+    eventCount: json.event_count,
+    revenueEventCount: json.revenue_event_count,
+    activityEventCount: json.activity_event_count,
+    revenueTrend: json.revenue_trend,
+    totalRevenueUsdCents: json.total_revenue,
+    lastUpdated: json.last_updated,
+    fetchedAt: new Date().toISOString(),
+  };
+}
+
 // CoinGecko free tier — fine for a cached, low-frequency lookup. Swap for a
 // paid tier if you outgrow the rate limit.
 export async function getTokenPrice(symbol) {

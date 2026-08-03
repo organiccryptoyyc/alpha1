@@ -22,6 +22,7 @@ import {
   getPeaqGasPrice,
   getPeaqLatestBlock,
   getPeaqBalance,
+  getPeaqMachineVerification,
 } from "./dataSources.js";
 
 const app = express();
@@ -120,6 +121,19 @@ app.get("/v1/peaq/gas-price", async (req, res, next) => {
 app.get("/v1/peaq/latest-block", async (req, res, next) => {
   try {
     res.json(await cached("peaq:block", 8, getPeaqLatestBlock));
+  } catch (err) {
+    next(err);
+  }
+});
+
+// peaq machine trust/verification lookup (peaqOS MCR API). Longer TTL (300s)
+// than the RPC routes above -- upstream's own MCR score cache defaults to
+// 3600s, so polling faster than a few minutes just burns our request budget
+// against peaq's 90 req/min-per-IP rate limit for no fresher data.
+app.get("/v1/peaq/machine-verify/:idOrAddress", async (req, res, next) => {
+  try {
+    const { idOrAddress } = req.params;
+    res.json(await cached(`peaq:verify:${idOrAddress}`, 300, () => getPeaqMachineVerification(idOrAddress)));
   } catch (err) {
     next(err);
   }

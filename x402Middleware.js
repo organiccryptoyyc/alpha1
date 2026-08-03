@@ -222,6 +222,47 @@ export const routes = {
       output: { example: { chain: "peaq", blockNumber: 3137077 } },
     }),
   },
+  // Niche, judgment-tier route (same pricing logic as POKT service-demand
+  // above): a machine trust/verification signal, not a raw pass-through.
+  // Sourced from peaq's own public MCR (Machine Credit Rating) API --
+  // credit rating, bond status, negative-flag, and event history for any
+  // registered peaq machine. Sellable to other agents/bots deciding whether
+  // to transact with a given machine, which is exactly the "is this thing
+  // real and trustworthy" question a verifier needs answered before it pays
+  // that machine for anything else.
+  "GET /v1/peaq/machine-verify/:idOrAddress": {
+    accepts: multiNetworkAccepts(0.03),
+    description:
+      "Trust/verification check for a peaq network machine: credit rating (MCR), bond status, " +
+      "negative-flag status, and on-chain event history. Sourced live from peaq's public MCR API " +
+      "-- pay once instead of building your own peaq chain integration to answer 'is this machine " +
+      "real and in good standing.'",
+    extensions: declareDiscoveryExtension({
+      pathParams: { idOrAddress: "0x1bd46178040bc2b50358b4e75b6ebf05e7801e8f" },
+      pathParamsSchema: {
+        properties: {
+          idOrAddress: {
+            type: "string",
+            description: "peaq machine DID (did:peaq:0x...) or raw 0x EVM address",
+          },
+        },
+        required: ["idOrAddress"],
+      },
+      output: {
+        example: {
+          source: "peaqos-mcr",
+          registered: true,
+          did: "did:peaq:0x1bd46178040bc2b50358b4e75b6ebf05e7801e8f",
+          machineId: 1,
+          creditRating: "BBB",
+          creditScore: 62,
+          bondStatus: "bonded",
+          negativeFlag: false,
+          eventCount: 12,
+        },
+      },
+    }),
+  },
   // Niche, higher-margin route: live Pocket Network Shannon relay-demand
   // ranking, not another RPC/price pass-through. Priced above the RPC routes
   // because it's not commodity data — nothing else on Bazaar sells "which

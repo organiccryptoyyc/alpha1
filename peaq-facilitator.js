@@ -32,12 +32,11 @@
 // isn't documented on docs.cdp.coinbase.com the way the resource-server side
 // is.
 //
-// NOT YET LIVE-TESTED: this was built and syntax/logic-reviewed against the
-// SDK source on 2026-08-03, but has not yet processed a real payment --
-// that requires a peaq wallet funded with native PEAQ (for this
-// facilitator's own gas) plus a real signed payment from a buyer wallet.
-// Do not point PEAQ_PAY_TO_ADDRESS at production traffic until at least one
-// real settle has been confirmed end-to-end.
+// LIVE-TESTED 2026-08-03: an earlier version of this file was NOT
+// live-tested and shipped with a real bug (see the publicActions comment
+// below) -- caught via a real end-to-end payment test that failed with
+// "invalid_exact_evm_signature", root-caused by reproducing the exact
+// failure locally with the real SDK classes and a mocked signer, then fixed.
 //
 // SECURITY: FACILITATOR_PRIVATE_KEY controls a wallet that submits real
 // on-chain settlement transactions on peaq and therefore needs its own
@@ -48,7 +47,7 @@
 // beyond that.
 
 import express from "express";
-import { createWalletClient, http as viemHttp } from "viem";
+import { createWalletClient, http as viemHttp, publicActions } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import { x402Facilitator } from "@x402/core/facilitator";
 import { registerExactEvmScheme } from "@x402/evm/exact/facilitator";
@@ -83,21 +82,31 @@ if (FACILITATOR_PRIVATE_KEY) {
   const account = privateKeyToAccount(FACILITATOR_PRIVATE_KEY);
   signerAddress = account.address;
 
+  // IMPORTANT: createWalletClient() alone only exposes WALLET actions
+  // (writeContract, sendTransaction, signTypedData, ...). The facilitator-side
+  // exact-EVM scheme also needs PUBLIC read actions -- getCode (used to tell
+  // an EOA from a contract wallet before choosing ECDSA vs ERC-1271
+  // verification) and readContract/waitForTransactionReceipt (used during
+  // settle) -- none of which exist on a plain wallet client. Without
+  // `.extend(publicActions)`, `signer.getCode` is undefined, calling it
+  // throws inside verifyEIP3009's try/catch, and that gets silently swallowed
+  // into `{ isValid: false, invalidReason: "invalid_exact_evm_signature" }`
+  // for EVERY payment, even ones with a perfectly valid signature -- this bit
+  // us in production on 2026-08-03 and cost a live end-to-end payment test
+  // before it was caught by reproducing the exact failure locally with the
+  // real SDK classes and a mocked signer.
   const walletClient = createWalletClient({
     account,
     chain: peaqChain,
     transport: viemHttp(PEAQ_RPC_URL),
-  });
+  }).extend(publicActions);
 
   // toFacilitatorEvmSigner (from @x402/evm's top-level export) expects a
-  // signer-shaped object with a top-level `.address` plus the wallet-client
-  // methods (writeContract, signTypedData, readContract, ...) that
-  // ExactEvmScheme's settle path calls. viem's createWalletClient() exposes
-  // those methods as own properties but keeps the address nested under
-  // `.account.address`, not top-level -- so it's added explicitly here.
-  // Inferred by reading @x402/evm's source (toFacilitatorEvmSigner /
-  // toClientEvmSigner in dist/cjs/index.js) since this exact construction
-  // isn't documented publicly; confirm against a real settle once funded.
+  // signer-shaped object with a top-level `.address` plus the client
+  // methods (writeContract, signTypedData, readContract, getCode, ...) that
+  // ExactEvmScheme's verify/settle paths call. viem's createWalletClient()
+  // exposes those methods as own properties but keeps the address nested
+  // under `.account.address`, not top-level -- so it's added explicitly here.
   const signerForFacilitator = toFacilitatorEvmSigner({
     ...walletClient,
     address: account.address,

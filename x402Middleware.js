@@ -125,22 +125,95 @@ const PEAQ_FACILITATOR_URL = process.env.PEAQ_FACILITATOR_URL || "http://peaq-fa
 // "is peaq actually active" instead of re-reading the env var here.
 const PEAQ_PAY_TO_ADDRESS_SET = Boolean(PEAQ_PAY_TO_ADDRESS);
 
+// --- BNB Smart Chain (BSC, chain ID 56) -- SCAFFOLDED, NOT YET ACTIVE ------
+// Binance's own hosted x402 facilitator ("B402") launched on BSC in July
+// 2026, covering the stablecoins U, USD1, USDT, and USDC
+// (developers.binance.com/docs/products/onchainpay-x402). Unlike CDP (a
+// free-signup bearer API key) or our self-hosted peaq facilitator (plain
+// HTTP, no auth), B402 requires becoming an approved "partner developer":
+// a formal application (business name, contact email, the BSC payout wallet
+// below, a 1024-bit RSA public key, and this server's outbound IP for
+// allowlisting), filed separately for sandbox and production, per
+// developers.binance.com's "Apply partner developer account" page. Every
+// B402 API call then has to be signed RSA-SHA256 with the matching private
+// key -- a plain `new HTTPFacilitatorClient({ url })` (which works fine for
+// CDP and our own peaq facilitator) has no way to produce that signature, so
+// it cannot talk to B402 as-is.
+//
+// VERIFIED ON-CHAIN (2026-08-03, queried directly via eth_call against BSC
+// mainnet -- not assumed from docs, same discipline that caught the peaq
+// domain bug below): despite Binance's own docs listing "USD1" as
+// supporting the x402 "eip3009" scheme, USD1's real deployed contract
+// (address in BSC_USD1 below) REVERTS on authorizationState(address,bytes32)
+// -- it does not actually implement EIP-3009 transferWithAuthorization. It
+// DOES implement EIP-2612 permit (nonces() succeeds) and reports a real
+// EIP-5267 domain via eip712Domain() (not the separate version() selector,
+// which returned an empty string on this specific contract). A real
+// USD1 payment would therefore have to go through @x402/evm's Permit2
+// fallback path (x402ExactPermit2Proxy -- confirmed present in the
+// installed @x402/evm@2.20.0 package) rather than the plain
+// transferWithAuthorization flow already proven on Solana and peaq. That
+// path has NOT been live-tested by this project -- treat it with at least
+// as much caution as peaq needed before its first real payment.
+//
+// buildBinanceFacilitatorConfig() deliberately returns null (no RSA signing
+// implemented yet), which keeps BSC_ENABLED false and this entire network
+// inert -- exactly the "don't advertise a network we can't actually settle"
+// discipline the peaq section above documents as a real past incident, not
+// a hypothetical. To finish activating BSC: (1) apply for and receive B402
+// partner credentials (sandbox first), (2) implement RSA-SHA256 request
+// signing here per developers.binance.com's "API request signing" page,
+// (3) set BSC_PAY_TO_ADDRESS + the B402 credentials in Portainer, (4) run a
+// real end-to-end payment test before trusting it, the same way peaq needed
+// two live-test rounds to surface real bugs no amount of code review caught.
+const BSC_PAY_TO_ADDRESS = process.env.BSC_PAY_TO_ADDRESS;
+if (!BSC_PAY_TO_ADDRESS) {
+  console.warn(
+    "[x402] NOTE: BSC_PAY_TO_ADDRESS is not set. BSC is not offered as a " +
+      "payment option -- this is expected, see the BSC scaffolding note in " +
+      "x402Middleware.js for what's still needed before it can be."
+  );
+}
+
+function buildBinanceFacilitatorConfig() {
+  // TODO: implement RSA-SHA256 request signing (see comment above) once
+  // B402 partner credentials exist. Returning null keeps BSC fully inert
+  // regardless of whether BSC_PAY_TO_ADDRESS is set.
+  return null;
+}
+const binanceFacilitatorConfig = buildBinanceFacilitatorConfig();
+const BSC_ENABLED = Boolean(BSC_PAY_TO_ADDRESS && binanceFacilitatorConfig);
+if (BSC_PAY_TO_ADDRESS && !binanceFacilitatorConfig) {
+  console.warn(
+    "[x402] NOTE: BSC_PAY_TO_ADDRESS is set but the B402 facilitator client " +
+      "isn't implemented yet (needs RSA-SHA256 signing + partner " +
+      "credentials) -- BSC will NOT be offered as a payment option until " +
+      "that's finished."
+  );
+}
+
 // One resource server per process. Only add the self-hosted peaq facilitator
-// to the array once peaq is actually wired up (see note above) -- otherwise
-// this is exactly the single-facilitator (CDP) setup already proven working
-// in production. Register the Solana "exact" scheme (SPL/USDC transfers)
-// unconditionally, the EVM "exact" scheme scoped to peaq only (not a
-// blanket eip155:* wildcard) ONLY when peaq is active, and the Bazaar
+// (and, once finished, the B402 client) to the array once each is actually
+// wired up (see notes above) -- otherwise this is exactly the
+// single-facilitator (CDP) setup already proven working in production.
+// Register the Solana "exact" scheme (SPL/USDC transfers) unconditionally,
+// the EVM "exact" scheme scoped to only the specific EVM networks that are
+// actually active (never a blanket eip155:* wildcard), and the Bazaar
 // discovery extension once, then reuse this one server instance for every
 // route below.
+const additionalFacilitators = [];
+if (PEAQ_PAY_TO_ADDRESS_SET) additionalFacilitators.push(new HTTPFacilitatorClient({ url: PEAQ_FACILITATOR_URL }));
+if (BSC_ENABLED) additionalFacilitators.push(new HTTPFacilitatorClient(binanceFacilitatorConfig));
+
 const server = new x402ResourceServer(
-  PEAQ_PAY_TO_ADDRESS_SET
-    ? [facilitatorClient, new HTTPFacilitatorClient({ url: PEAQ_FACILITATOR_URL })]
-    : facilitatorClient
+  additionalFacilitators.length > 0 ? [facilitatorClient, ...additionalFacilitators] : facilitatorClient
 );
 registerExactSvmScheme(server, { rpcUrl: process.env.SOL_RPC_URL });
-if (PEAQ_PAY_TO_ADDRESS_SET) {
-  registerExactEvmScheme(server, { networks: ["eip155:3338"] });
+const evmNetworks = [];
+if (PEAQ_PAY_TO_ADDRESS_SET) evmNetworks.push("eip155:3338");
+if (BSC_ENABLED) evmNetworks.push("eip155:56");
+if (evmNetworks.length > 0) {
+  registerExactEvmScheme(server, { networks: evmNetworks });
 }
 server.registerExtension(bazaarResourceServerExtension);
 
@@ -184,12 +257,40 @@ const PEAQ_USDC = {
   version: "2",
 };
 
+// CAIP-2 id for BNB Smart Chain mainnet — chain ID 56.
+const BSC_MAINNET = "eip155:56";
+
+// World Liberty Financial USD (USD1) on BSC — see the BSC scaffolding note
+// above for why this asset was picked over USDT/USDC (Binance's own docs
+// list those two as permit2-exact/permit2-upto ONLY, never eip3009, and
+// this project hasn't built/tested a Permit2 flow yet either way).
+//
+// Every field below was queried directly from the live contract on
+// 2026-08-03 (eth_call against BSC mainnet), not assumed from docs or
+// convention -- name/version specifically came from eip712Domain()
+// (EIP-5267), not the separate name()/version() selectors, because this
+// contract's standalone version() call returned an empty string while
+// eip712Domain() reported the real signing domain used on-chain:
+//   name()          -> "World Liberty Financial USD"
+//   eip712Domain()  -> name "World Liberty Financial USD", version "1"
+//   decimals()      -> 18 (NOT 6 -- unlike every other stablecoin in this
+//                      file, USD1 uses 18 decimals; verified, not assumed)
+// Inert until BSC_ENABLED is true (see above) -- multiNetworkAccepts() below
+// only pushes this once a real B402 facilitator client exists.
+const BSC_USD1 = {
+  address: "0x8d0D000eE44948FC98c9B98A4FA4921476f08B0D",
+  decimals: 18,
+  name: "World Liberty Financial USD",
+  version: "1",
+};
+
 // Builds a route's `accepts` array: always Solana (unchanged from before),
-// plus peaq as a second option once PEAQ_PAY_TO_ADDRESS is configured. Same
-// USD price on both networks — usdAmount is a plain number (e.g. 0.005), not
-// a "$"-prefixed string, so it can be converted to both a Money string for
-// the Solana side and an atomic USDC amount for the peaq side from one
-// source of truth.
+// plus peaq once PEAQ_PAY_TO_ADDRESS is configured, plus BSC once BSC_ENABLED
+// is true (see the scaffolding note above -- not yet reachable in
+// production). Same USD price on every network — usdAmount is a plain
+// number (e.g. 0.005), not a "$"-prefixed string, so it can be converted to
+// a Money string for Solana and an atomic token amount for each EVM side
+// from one source of truth.
 function multiNetworkAccepts(usdAmount) {
   const accepts = [
     { scheme: "exact", payTo: PAY_TO_ADDRESS, price: `$${usdAmount.toFixed(3)}`, network: SOLANA_MAINNET },
@@ -204,6 +305,18 @@ function multiNetworkAccepts(usdAmount) {
         extra: { name: PEAQ_USDC.name, version: PEAQ_USDC.version },
       },
       network: PEAQ_MAINNET,
+    });
+  }
+  if (BSC_ENABLED) {
+    accepts.push({
+      scheme: "exact",
+      payTo: BSC_PAY_TO_ADDRESS,
+      price: {
+        amount: Math.round(usdAmount * 10 ** BSC_USD1.decimals).toString(),
+        asset: BSC_USD1.address,
+        extra: { name: BSC_USD1.name, version: BSC_USD1.version },
+      },
+      network: BSC_MAINNET,
     });
   }
   return accepts;
@@ -254,12 +367,12 @@ export const routes = {
   },
   "GET /v1/wallet/balance/:chain/:address": {
     accepts: multiNetworkAccepts(0.008),
-    description: "Balance for an eth, sol, or peaq address",
+    description: "Balance for an eth, sol, peaq, or bsc address",
     extensions: declareDiscoveryExtension({
       pathParams: { chain: "eth", address: "0x0000000000000000000000000000000000000000" },
       pathParamsSchema: {
         properties: {
-          chain: { type: "string", description: "'eth', 'sol', or 'peaq'" },
+          chain: { type: "string", description: "'eth', 'sol', 'peaq', or 'bsc'" },
           address: { type: "string", description: "Wallet address on the given chain" },
         },
         required: ["chain", "address"],
@@ -284,6 +397,24 @@ export const routes = {
     description: "Latest peaq network block number",
     extensions: declareDiscoveryExtension({
       output: { example: { chain: "peaq", blockNumber: 3137077 } },
+    }),
+  },
+  // BNB Smart Chain commodity routes (chain ID 56) — same shape and pricing
+  // tier as the eth/sol/peaq equivalents above; pure pass-through data,
+  // sellable via Solana/peaq today regardless of BSC's own payment-network
+  // status (see the BSC scaffolding note in the payment-layer section above).
+  "GET /v1/bsc/gas-price": {
+    accepts: multiNetworkAccepts(0.005),
+    description: "Current BNB Smart Chain gas price (wei + gwei)",
+    extensions: declareDiscoveryExtension({
+      output: { example: { chain: "bsc", wei: "1000000000", gwei: 1 } },
+    }),
+  },
+  "GET /v1/bsc/latest-block": {
+    accepts: multiNetworkAccepts(0.005),
+    description: "Latest BNB Smart Chain block number",
+    extensions: declareDiscoveryExtension({
+      output: { example: { chain: "bsc", blockNumber: 48123456 } },
     }),
   },
   // Niche, judgment-tier route (same pricing logic as POKT service-demand

@@ -28,6 +28,9 @@ import {
   getPeaqLatestBlock,
   getPeaqBalance,
   getPeaqMachineVerification,
+  getBscGasPrice,
+  getBscLatestBlock,
+  getBscBalance,
 } from "./dataSources.js";
 
 const app = express();
@@ -171,8 +174,10 @@ app.get("/v1/wallet/balance/:chain/:address", async (req, res, next) => {
         ? () => getSolBalance(address)
         : chain === "peaq"
         ? () => getPeaqBalance(address)
+        : chain === "bsc"
+        ? () => getBscBalance(address)
         : null;
-    if (!fn) return res.status(400).json({ error: "chain must be 'eth', 'sol', or 'peaq'" });
+    if (!fn) return res.status(400).json({ error: "chain must be 'eth', 'sol', 'peaq', or 'bsc'" });
     res.json(await cached(key, 6, fn));
   } catch (err) {
     next(err);
@@ -190,6 +195,26 @@ app.get("/v1/peaq/gas-price", async (req, res, next) => {
 app.get("/v1/peaq/latest-block", async (req, res, next) => {
   try {
     res.json(await cached("peaq:block", 8, getPeaqLatestBlock));
+  } catch (err) {
+    next(err);
+  }
+});
+
+// BNB Smart Chain (BSC). Same TTL rationale as the eth/peaq gas + block
+// routes above -- sellable today via the existing Solana/peaq payment rails
+// even though BSC itself isn't wired up as a payment network yet (see
+// x402Middleware.js).
+app.get("/v1/bsc/gas-price", async (req, res, next) => {
+  try {
+    res.json(await cached("bsc:gas", 5, getBscGasPrice));
+  } catch (err) {
+    next(err);
+  }
+});
+
+app.get("/v1/bsc/latest-block", async (req, res, next) => {
+  try {
+    res.json(await cached("bsc:block", 8, getBscLatestBlock));
   } catch (err) {
     next(err);
   }

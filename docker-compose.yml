@@ -58,6 +58,22 @@ services:
       # http://peaq-facilitator:3333 (the service below) in code, so this
       # only needs setting in Portainer if you point it somewhere else.
       PEAQ_FACILITATOR_URL: ${PEAQ_FACILITATOR_URL}
+      # BNB Smart Chain (BSC, chain ID 56) data layer -- optional, same
+      # graceful-default pattern as ETH_RPC_URL/PEAQ_RPC_URL above. Powers
+      # GET /v1/bsc/gas-price, /v1/bsc/latest-block, and the 'bsc' option on
+      # /v1/wallet/balance/:chain/:address regardless of BSC's payment-network
+      # status below.
+      BSC_RPC_URL: ${BSC_RPC_URL}
+      # BSC as a PAYMENT network is scaffolded but NOT yet active -- see the
+      # BSC scaffolding note at the top of x402Middleware.js. Setting this
+      # alone does nothing yet: Binance's hosted facilitator (B402) requires
+      # a partner application (business details, this wallet address, an
+      # RSA keypair, an IP whitelist) plus RSA-SHA256 request signing that
+      # hasn't been implemented in buildBinanceFacilitatorConfig() yet. Left
+      # here so the one remaining step, once that client is written and
+      # partner credentials exist, is setting this value and redeploying --
+      # no further code changes needed.
+      BSC_PAY_TO_ADDRESS: ${BSC_PAY_TO_ADDRESS}
     depends_on:
       - sol-rpc-cache
     healthcheck:

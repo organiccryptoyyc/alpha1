@@ -19,6 +19,9 @@ import {
   getTokenPrice,
   getPoktServiceDemand,
   getUprockFetch,
+  getPeaqGasPrice,
+  getPeaqLatestBlock,
+  getPeaqBalance,
 } from "./dataSources.js";
 
 const app = express();
@@ -96,9 +99,27 @@ app.get("/v1/wallet/balance/:chain/:address", async (req, res, next) => {
         ? () => getEthBalance(address)
         : chain === "sol"
         ? () => getSolBalance(address)
+        : chain === "peaq"
+        ? () => getPeaqBalance(address)
         : null;
-    if (!fn) return res.status(400).json({ error: "chain must be 'eth' or 'sol'" });
+    if (!fn) return res.status(400).json({ error: "chain must be 'eth', 'sol', or 'peaq'" });
     res.json(await cached(key, 6, fn));
+  } catch (err) {
+    next(err);
+  }
+});
+
+app.get("/v1/peaq/gas-price", async (req, res, next) => {
+  try {
+    res.json(await cached("peaq:gas", 5, getPeaqGasPrice));
+  } catch (err) {
+    next(err);
+  }
+});
+
+app.get("/v1/peaq/latest-block", async (req, res, next) => {
+  try {
+    res.json(await cached("peaq:block", 8, getPeaqLatestBlock));
   } catch (err) {
     next(err);
   }

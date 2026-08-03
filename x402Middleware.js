@@ -19,6 +19,7 @@
 import { paymentMiddleware } from "@x402/express";
 import { x402ResourceServer, HTTPFacilitatorClient } from "@x402/core/server";
 import { registerExactSvmScheme } from "@x402/svm/exact/server";
+import { registerExactEvmScheme } from "@x402/evm/exact/server";
 import { bazaarResourceServerExtension, declareDiscoveryExtension } from "@x402/extensions/bazaar";
 import { facilitator } from "@coinbase/x402";
 
@@ -28,6 +29,22 @@ if (!PAY_TO_ADDRESS) {
     "[x402] WARNING: PAY_TO_ADDRESS is not set. Every route will fail to " +
       "generate valid payment requirements until you set your Solana wallet " +
       "address in the environment."
+  );
+}
+
+// peaq (EVM, chain ID 3338) payout address — a *different* wallet from
+// PAY_TO_ADDRESS above, since peaq is an EVM-layer chain and Solana keys
+// don't work there. Deliberately optional: until this is set, every route
+// below still lists Solana-only (current production behavior is unchanged).
+// The moment PEAQ_PAY_TO_ADDRESS is set in Portainer and the stack is
+// redeployed, peaq lights up as a second payment option on every route below
+// with no further code changes needed.
+const PEAQ_PAY_TO_ADDRESS = process.env.PEAQ_PAY_TO_ADDRESS;
+if (!PEAQ_PAY_TO_ADDRESS) {
+  console.warn(
+    "[x402] NOTE: PEAQ_PAY_TO_ADDRESS is not set. Routes will list Solana " +
+      "payment only until a peaq EVM wallet address is set in the " +
+      "environment -- this is expected until peaq support is finished."
   );
 }
 
@@ -48,11 +65,25 @@ if (!process.env.CDP_API_KEY_ID || !process.env.CDP_API_KEY_SECRET) {
 }
 const facilitatorClient = new HTTPFacilitatorClient(facilitator);
 
-// One resource server per process: register the Solana "exact" payment
-// scheme (SPL/USDC transfers) and the Bazaar discovery extension once, then
-// reuse it for every route below.
-const server = new x402ResourceServer(facilitatorClient);
+// PayAI's hosted facilitator is peaq's officially documented x402
+// facilitator (https://docs.peaq.xyz — x402 integration guide). Unlike CDP's
+// facilitator it doesn't require API key auth for verify/settle, matching
+// FacilitatorConfig's optional createAuthHeaders. Kept behind an env var so
+// it can be swapped without a code change if peaq documents a different
+// facilitator later.
+const PAYAI_FACILITATOR_URL = process.env.PAYAI_FACILITATOR_URL || "https://facilitator.payai.network";
+const peaqFacilitatorClient = new HTTPFacilitatorClient({ url: PAYAI_FACILITATOR_URL });
+
+// One resource server per process, backed by BOTH facilitators at once —
+// x402ResourceServer's constructor accepts a single client or an array.
+// Register the Solana "exact" scheme (SPL/USDC transfers), the EVM "exact"
+// scheme scoped to peaq only (not a blanket eip155:* wildcard — we don't
+// want to silently advertise support for other EVM chains this facilitator
+// setup was never tested against), and the Bazaar discovery extension once,
+// then reuse this one server instance for every route below.
+const server = new x402ResourceServer([facilitatorClient, peaqFacilitatorClient]);
 registerExactSvmScheme(server, { rpcUrl: process.env.SOL_RPC_URL });
+registerExactEvmScheme(server, { networks: ["eip155:3338"] });
 server.registerExtension(bazaarResourceServerExtension);
 
 // CAIP-2 id CDP's facilitator actually advertises for Solana mainnet — a
@@ -62,6 +93,57 @@ server.registerExtension(bazaarResourceServerExtension);
 // "Facilitator does not support scheme 'exact' on network ...".
 // Reference: https://docs.cdp.coinbase.com/x402/network-support
 const SOLANA_MAINNET = "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp";
+
+// CAIP-2 id for peaq mainnet — chain ID 3338, confirmed via peaq's own docs
+// (docs.peaq.xyz) and cross-checked against OnFinality/ChainList/PublicNode.
+const PEAQ_MAINNET = "eip155:3338";
+
+// peaq's officially-announced bridged USDC (confirmed via peaq.xyz's own
+// "USDC is now on peaq" blog post, cross-checked on Subscan: symbol USDC,
+// 6 decimals, contract type FiatTokenProxy — i.e. Circle's standard
+// FiatTokenV2 proxy pattern, the same contract template used for every other
+// "USD Coin"/"2" entry in @x402/evm's own default-asset table). It is NOT
+// in that table for peaq, so every route below supplies this asset
+// explicitly instead of relying on the "$X.XX" shorthand, which would throw
+// "No default asset configured for network eip155:3338".
+//
+// name/version here are the EIP-712 signing-domain fields the exact-EVM
+// scheme includes in payment requirements so a wallet can produce a valid
+// transferWithAuthorization signature — NOT display text. "USD Coin"/"2" is
+// Circle's fixed domain for every FiatTokenV2 deployment regardless of
+// chain; if the very first live peaq payment fails signature verification,
+// this is the first thing to re-check against the deployed contract itself.
+const PEAQ_USDC = {
+  address: "0xbbA60da06c2c5424f03f7434542280FCAd453d10",
+  decimals: 6,
+  name: "USD Coin",
+  version: "2",
+};
+
+// Builds a route's `accepts` array: always Solana (unchanged from before),
+// plus peaq as a second option once PEAQ_PAY_TO_ADDRESS is configured. Same
+// USD price on both networks — usdAmount is a plain number (e.g. 0.005), not
+// a "$"-prefixed string, so it can be converted to both a Money string for
+// the Solana side and an atomic USDC amount for the peaq side from one
+// source of truth.
+function multiNetworkAccepts(usdAmount) {
+  const accepts = [
+    { scheme: "exact", payTo: PAY_TO_ADDRESS, price: `$${usdAmount.toFixed(3)}`, network: SOLANA_MAINNET },
+  ];
+  if (PEAQ_PAY_TO_ADDRESS) {
+    accepts.push({
+      scheme: "exact",
+      payTo: PEAQ_PAY_TO_ADDRESS,
+      price: {
+        amount: Math.round(usdAmount * 10 ** PEAQ_USDC.decimals).toString(),
+        asset: PEAQ_USDC.address,
+        extra: { name: PEAQ_USDC.name, version: PEAQ_USDC.version },
+      },
+      network: PEAQ_MAINNET,
+    });
+  }
+  return accepts;
+}
 
 // Prices are intentionally above the ~$0.00125 combined Solana network fee +
 // CDP facilitator fee ($0.00025 + $0.001 after the first 1,000 free calls/mo)
@@ -74,28 +156,28 @@ const SOLANA_MAINNET = "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp";
 // find and call these routes without you doing anything further.
 export const routes = {
   "GET /v1/eth/gas-price": {
-    accepts: { scheme: "exact", payTo: PAY_TO_ADDRESS, price: "$0.005", network: SOLANA_MAINNET },
+    accepts: multiNetworkAccepts(0.005),
     description: "Current Ethereum gas price (wei + gwei)",
     extensions: declareDiscoveryExtension({
       output: { example: { chain: "ethereum", wei: "12345678901", gwei: 12.345678901 } },
     }),
   },
   "GET /v1/eth/latest-block": {
-    accepts: { scheme: "exact", payTo: PAY_TO_ADDRESS, price: "$0.005", network: SOLANA_MAINNET },
+    accepts: multiNetworkAccepts(0.005),
     description: "Latest Ethereum block number",
     extensions: declareDiscoveryExtension({
       output: { example: { chain: "ethereum", blockNumber: 20123456 } },
     }),
   },
   "GET /v1/sol/latest-block": {
-    accepts: { scheme: "exact", payTo: PAY_TO_ADDRESS, price: "$0.005", network: SOLANA_MAINNET },
+    accepts: multiNetworkAccepts(0.005),
     description: "Latest Solana slot",
     extensions: declareDiscoveryExtension({
       output: { example: { chain: "solana", slot: 289456123 } },
     }),
   },
   "GET /v1/price/:symbol": {
-    accepts: { scheme: "exact", payTo: PAY_TO_ADDRESS, price: "$0.005", network: SOLANA_MAINNET },
+    accepts: multiNetworkAccepts(0.005),
     description: "USD price for eth, sol, btc, usdc, or pokt",
     extensions: declareDiscoveryExtension({
       pathParams: { symbol: "eth" },
@@ -107,18 +189,37 @@ export const routes = {
     }),
   },
   "GET /v1/wallet/balance/:chain/:address": {
-    accepts: { scheme: "exact", payTo: PAY_TO_ADDRESS, price: "$0.008", network: SOLANA_MAINNET },
-    description: "Balance for an eth or sol address",
+    accepts: multiNetworkAccepts(0.008),
+    description: "Balance for an eth, sol, or peaq address",
     extensions: declareDiscoveryExtension({
       pathParams: { chain: "eth", address: "0x0000000000000000000000000000000000000000" },
       pathParamsSchema: {
         properties: {
-          chain: { type: "string", description: "'eth' or 'sol'" },
+          chain: { type: "string", description: "'eth', 'sol', or 'peaq'" },
           address: { type: "string", description: "Wallet address on the given chain" },
         },
         required: ["chain", "address"],
       },
       output: { example: { chain: "eth", address: "0x...", eth: 1.2345 } },
+    }),
+  },
+  // peaq-native commodity routes (chain ID 3338) — same shape as the eth/sol
+  // routes above, just pointed at peaq's own RPC. Priced at the same tier as
+  // their eth/sol equivalents since they're the same kind of pass-through
+  // data; peaq's differentiated value-add is the machine-identity route
+  // (planned separately), not these.
+  "GET /v1/peaq/gas-price": {
+    accepts: multiNetworkAccepts(0.005),
+    description: "Current peaq network gas price (wei + gwei)",
+    extensions: declareDiscoveryExtension({
+      output: { example: { chain: "peaq", wei: "1234567", gwei: 0.001234567 } },
+    }),
+  },
+  "GET /v1/peaq/latest-block": {
+    accepts: multiNetworkAccepts(0.005),
+    description: "Latest peaq network block number",
+    extensions: declareDiscoveryExtension({
+      output: { example: { chain: "peaq", blockNumber: 3137077 } },
     }),
   },
   // Niche, higher-margin route: live Pocket Network Shannon relay-demand
@@ -128,7 +229,7 @@ export const routes = {
   // (gateway/supplier operators deciding where to stake) has higher intent
   // than a generic lookup agent.
   "GET /v1/pokt/service-demand": {
-    accepts: { scheme: "exact", payTo: PAY_TO_ADDRESS, price: "$0.03", network: SOLANA_MAINNET },
+    accepts: multiNetworkAccepts(0.03),
     description:
       "Live Pocket Network (Shannon) relay-demand ranking: which services/chains are seeing " +
       "the most relay volume right now, trend vs. the prior EMA window, and active supplier " +
@@ -168,7 +269,7 @@ export const routes = {
   // chase the cost floor down. Note the ~65-100 calls/day free-tier ceiling
   // before UpRock billing shifts to per-credit overage.
   "GET /v1/uprock/fetch": {
-    accepts: { scheme: "exact", payTo: PAY_TO_ADDRESS, price: "$0.10", network: SOLANA_MAINNET },
+    accepts: multiNetworkAccepts(0.1),
     description:
       "Fetch any URL through a real residential/mobile device (UpRock's network, 190+ " +
       "countries) instead of a datacenter IP -- returns the page as an actual user in that " +

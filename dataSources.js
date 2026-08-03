@@ -8,6 +8,11 @@
 
 const ETH_RPC_URL = process.env.ETH_RPC_URL || "https://eth.llamarpc.com";
 const SOL_RPC_URL = process.env.SOL_RPC_URL || "https://api.mainnet-beta.solana.com";
+// peaq is a standard EVM chain (chain ID 3338) — same JSON-RPC interface as
+// ETH_RPC_URL above, just pointed at peaq's public RPC by default. Free
+// public endpoints (publicnode, OnFinality, etc.) are fine for these
+// low-frequency snapshot calls; swap in a paid/private RPC if volume grows.
+const PEAQ_RPC_URL = process.env.PEAQ_RPC_URL || "https://peaq-rpc.publicnode.com";
 // If you stake POKT and run a gateway, point ETH_RPC_URL / SOL_RPC_URL at your
 // POKT gateway endpoint instead of the public defaults above — same interface,
 // you just become the infra layer instead of renting someone else's.
@@ -73,6 +78,44 @@ export async function getSolBalance(address) {
     address,
     lamports: value,
     sol: value / 1e9,
+    fetchedAt: new Date().toISOString(),
+  };
+}
+
+// --- peaq (machine-economy L1, chain ID 3338) ------------------------------
+// Same eth_* JSON-RPC surface as the Ethereum functions above since peaq is
+// EVM-compatible — these exist as their own "peaq" chain label (rather than
+// routing peaq addresses through the existing eth/ functions) so the sale
+// catalog can price and list "peaq network data" as its own distinct
+// product, separate from Ethereum mainnet data.
+export async function getPeaqGasPrice() {
+  const hex = await rpcCall(PEAQ_RPC_URL, "eth_gasPrice");
+  const wei = BigInt(hex);
+  return {
+    chain: "peaq",
+    wei: wei.toString(),
+    gwei: Number(wei) / 1e9,
+    fetchedAt: new Date().toISOString(),
+  };
+}
+
+export async function getPeaqLatestBlock() {
+  const hex = await rpcCall(PEAQ_RPC_URL, "eth_blockNumber");
+  return {
+    chain: "peaq",
+    blockNumber: parseInt(hex, 16),
+    fetchedAt: new Date().toISOString(),
+  };
+}
+
+export async function getPeaqBalance(address) {
+  const hex = await rpcCall(PEAQ_RPC_URL, "eth_getBalance", [address, "latest"]);
+  const wei = BigInt(hex);
+  return {
+    chain: "peaq",
+    address,
+    wei: wei.toString(),
+    peaq: Number(wei) / 1e18,
     fetchedAt: new Date().toISOString(),
   };
 }

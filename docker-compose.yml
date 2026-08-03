@@ -41,6 +41,16 @@ services:
       # it, that one route fails with "UPROCK_API_KEY is not set" but every
       # other route is unaffected.
       UPROCK_API_KEY: ${UPROCK_API_KEY}
+      # peaq (EVM, chain ID 3338) support -- all three optional/graceful:
+      # PEAQ_PAY_TO_ADDRESS is the peaq EVM wallet address payments settle
+      # to (a *different* wallet than PAY_TO_ADDRESS, which is Solana-only).
+      # Until this is set, every route just lists Solana payment only --
+      # nothing breaks. PEAQ_RPC_URL defaults to a free public peaq RPC if
+      # unset. PAYAI_FACILITATOR_URL defaults to PayAI's public hosted
+      # facilitator (peaq's officially documented x402 facilitator) if unset.
+      PEAQ_PAY_TO_ADDRESS: ${PEAQ_PAY_TO_ADDRESS}
+      PEAQ_RPC_URL: ${PEAQ_RPC_URL}
+      PAYAI_FACILITATOR_URL: ${PAYAI_FACILITATOR_URL}
     depends_on:
       - sol-rpc-cache
     healthcheck:

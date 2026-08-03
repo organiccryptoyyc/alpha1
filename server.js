@@ -18,6 +18,11 @@ import {
   getSolBalance,
   getTokenPrice,
   getPoktServiceDemand,
+  getPoktSupplierLandscape,
+  getPoktApplicationDemand,
+  getPoktTokenomics,
+  getPoktThroughputLeaderboard,
+  getPoktValidatorSecurity,
   getUprockFetch,
   getPeaqGasPrice,
   getPeaqLatestBlock,
@@ -147,6 +152,63 @@ app.get("/v1/pokt/service-demand", async (req, res, next) => {
   try {
     const limit = req.query.limit;
     res.json(await cached(`pokt:demand:${limit || 10}`, 60, () => getPoktServiceDemand(limit)));
+  } catch (err) {
+    next(err);
+  }
+});
+
+// POKT Shannon supplier landscape. Same 60s TTL rationale as service-demand
+// above -- staked-actor counts move on the order of sessions, not seconds.
+app.get("/v1/pokt/suppliers", async (req, res, next) => {
+  try {
+    const limit = req.query.limit;
+    res.json(await cached(`pokt:suppliers:${limit || 10}`, 60, () => getPoktSupplierLandscape(limit)));
+  } catch (err) {
+    next(err);
+  }
+});
+
+// POKT Shannon application (demand-side) stake feed.
+app.get("/v1/pokt/applications", async (req, res, next) => {
+  try {
+    const limit = req.query.limit;
+    res.json(await cached(`pokt:applications:${limit || 10}`, 60, () => getPoktApplicationDemand(limit)));
+  } catch (err) {
+    next(err);
+  }
+});
+
+// POKT Shannon tokenomics / settlement split. Longer TTL (300s) -- these are
+// governance params that change by proposal, not by the block, per
+// pocket-engineering's caching guidance (cache ~1hr max, this is more
+// conservative than that ceiling).
+app.get("/v1/pokt/tokenomics", async (req, res, next) => {
+  try {
+    res.json(await cached("pokt:tokenomics", 300, getPoktTokenomics));
+  } catch (err) {
+    next(err);
+  }
+});
+
+// POKT Shannon throughput-by-service leaderboard (all-time cumulative
+// claimed volume). 120s TTL -- this one costs an N+1-aliased GraphQL query
+// per cache miss, so it's worth not hammering the indexer every request.
+app.get("/v1/pokt/throughput", async (req, res, next) => {
+  try {
+    const limit = req.query.limit;
+    res.json(await cached(`pokt:throughput:${limit || 10}`, 120, () => getPoktThroughputLeaderboard(limit)));
+  } catch (err) {
+    next(err);
+  }
+});
+
+// POKT Shannon validator security / decentralization feed. 300s TTL -- the
+// bonded validator set changes rarely (unstaking has multi-session unbonding
+// periods), so this doesn't need to be fresh to the minute.
+app.get("/v1/pokt/validators", async (req, res, next) => {
+  try {
+    const limit = req.query.limit;
+    res.json(await cached(`pokt:validators:${limit || 10}`, 300, () => getPoktValidatorSecurity(limit)));
   } catch (err) {
     next(err);
   }

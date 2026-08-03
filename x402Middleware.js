@@ -15,6 +15,13 @@
 // — this ecosystem moves fast. What will NOT change regardless of SDK version:
 // you need (1) a payout address, (2) a facilitator that settles payments and
 // reports to Bazaar, (3) a price per route.
+//
+// NOT-DEPLOYED: the "POKT data-expansion pack" block below (suppliers,
+// applications, tokenomics, throughput, validators) was written and
+// syntax-checked overnight 2026-08-02 but deliberately NOT pushed to GitHub
+// or redeployed to Portainer yet -- holding for explicit approval so the
+// currently-live 11/11 Alpha5 state (tag: alpha5) keeps earning through the
+// night undisturbed. Review, then push + "Pull and redeploy" when ready.
 
 import { paymentMiddleware } from "@x402/express";
 import { x402ResourceServer, HTTPFacilitatorClient } from "@x402/core/server";
@@ -86,6 +93,31 @@ const facilitatorClient = new HTTPFacilitatorClient(facilitator);
 // Also confirmed PayAI genuinely does NOT support eip155:3338 (peaq) in its
 // live /supported response despite peaq's docs claiming it does, so this
 // stays unused until a working peaq facilitator is found anyway.
+//
+// TODO (next patch that touches this file): the "second facilitator broke
+// Solana settlement" theory above was re-examined overnight 2026-08-02 by
+// reading the actual @x402/core source, and it doesn't hold up -- facilitator
+// selection is deterministic (first array entry wins per network+scheme) and
+// has no concept of price, but the failures only ever hit the two highest
+// price tiers ($0.03/$0.10). That pattern matches a simple insufficient-
+// USDC-balance-in-the-test-wallet explanation exactly as well, which is what
+// the SECOND "1/11 paid" regression was later confirmed to actually be, via
+// Solscan. CONFIRM which one it really was next time this file is touched:
+// on a non-prod branch, temporarily make BOTH facilitators + the EVM scheme
+// unconditional again (remove the PEAQ_PAY_TO_ADDRESS_SET guards below), top
+// the test wallet up well above $0.20, and run test-all-routes.mjs. 11/11 =
+// the theory above was wrong and this conditional gating never fixed a real
+// bug (still fine to keep as defensive practice). Any $0.03/$0.10 failure
+// even with ample funds = there's a real amount-dependent bug worth chasing.
+//
+// If/when peaq is reactivated: do NOT reach for PayAI again, they still
+// don't support peaq. Use peaq's own self-hosted reference facilitator
+// instead (github.com/peaqnetwork/x402-peaq) -- but port it to @x402/core +
+// @x402/evm v2 first. Their reference code targets the OLDER x402-foundation
+// SDK (`x402`/`x402-types` packages, prices as `network: "peaq"` not CAIP-2
+// `"eip155:3338"`), which is a different protocol-version surface than what
+// this server runs on -- confirm it actually speaks x402Version 2 /
+// PAYMENT-SIGNATURE headers before wiring it in, not just copy-paste it.
 const PAYAI_FACILITATOR_URL = process.env.PAYAI_FACILITATOR_URL || "https://facilitator.payai.network";
 // Reuses the PEAQ_PAY_TO_ADDRESS declared above -- one source of truth for
 // "is peaq actually active" instead of re-reading the env var here.
@@ -321,6 +353,142 @@ export const routes = {
               pctChange: 4.62,
               activeSuppliers: 812,
             },
+          ],
+        },
+      },
+    }),
+  },
+  // --- POKT data-expansion pack (built overnight 2026-08-02, held for
+  // review/deploy approval -- see NOT-DEPLOYED note at top of this file) ---
+  // Five new POKT Shannon routes, same "judgment-tier, not commodity
+  // pass-through" pricing logic as service-demand above. Every field name
+  // below matches the live-verified GraphQL/LCD schema in dataSources.js --
+  // nothing here was guessed from docs alone (peaq's docs were already wrong
+  // once this session; the indexer's own docs were wrong about the `relays`
+  // connection being populated, caught by live-testing before writing code).
+  "GET /v1/pokt/suppliers": {
+    accepts: multiNetworkAccepts(0.02),
+    description:
+      "Pocket Network (Shannon) supplier landscape: active supplier count, total POKT staked " +
+      "network-wide, and the top staked operators with their service-config counts. Supply-side " +
+      "complement to /v1/pokt/service-demand's demand-side signal.",
+    extensions: declareDiscoveryExtension({
+      input: { limit: "10" },
+      inputSchema: {
+        properties: {
+          limit: { type: "string", description: "Number of top suppliers to return, 1-25 (default 10)" },
+        },
+      },
+      output: {
+        example: {
+          network: "pocket-shannon",
+          activeSuppliers: 4083,
+          totalStakedPokt: 245006941.99,
+          rankedBy: "stakeAmount",
+          topSuppliers: [
+            { operatorId: "pokt1jck7...", stakedPokt: 60499.99, servicesCount: 7 },
+          ],
+        },
+      },
+    }),
+  },
+  "GET /v1/pokt/applications": {
+    accepts: multiNetworkAccepts(0.02),
+    description:
+      "Pocket Network (Shannon) application (demand-side) stake feed: active application count, " +
+      "total POKT staked to consume relays, and the top-staked applications -- who's buying " +
+      "network capacity and how much.",
+    extensions: declareDiscoveryExtension({
+      input: { limit: "10" },
+      inputSchema: {
+        properties: {
+          limit: { type: "string", description: "Number of top applications to return, 1-25 (default 10)" },
+        },
+      },
+      output: {
+        example: {
+          network: "pocket-shannon",
+          activeApplications: 125,
+          totalStakedPokt: 830714.22,
+          rankedBy: "stakeAmount",
+          topApplications: [
+            { applicationId: "pokt1hufj...", stakedPokt: 29580.35, servicesSubscribed: 1 },
+          ],
+        },
+      },
+    }),
+  },
+  "GET /v1/pokt/tokenomics": {
+    accepts: multiNetworkAccepts(0.02),
+    description:
+      "Live Pocket Network (Shannon) tokenomics parameters straight from chain governance: the " +
+      "PIP-41 mint ratio, the live burn-equals-mint settlement split (dao/proposer/supplier/" +
+      "source_owner/application), and the compute-units-to-tokens multiplier. Never cached beyond " +
+      "5 minutes; these are the numbers that go stale the moment a governance proposal passes.",
+    extensions: declareDiscoveryExtension({
+      output: {
+        example: {
+          network: "pocket-shannon",
+          mintRatio: 0.975,
+          settlementDistribution: { dao: 0.045, proposer: 0.14, supplier: 0.79, source_owner: 0.025, application: 0 },
+          globalInflationPerClaim: 0.000001,
+          computeUnitsToTokensMultiplier: "132470",
+          blocksPerSession: "20",
+        },
+      },
+    }),
+  },
+  "GET /v1/pokt/throughput": {
+    accepts: multiNetworkAccepts(0.03),
+    description:
+      "Pocket Network (Shannon) throughput-by-service leaderboard: services ranked by ALL-TIME " +
+      "cumulative on-chain CLAIMED relay and compute-unit volume -- real settled throughput, " +
+      "distinct from service-demand's difficulty-adjusted momentum signal.",
+    extensions: declareDiscoveryExtension({
+      input: { limit: "10" },
+      inputSchema: {
+        properties: {
+          limit: { type: "string", description: "Number of top services to return, 1-15 (default 10)" },
+        },
+      },
+      output: {
+        example: {
+          network: "pocket-shannon",
+          rankedBy: "cumulativeClaimedRelays",
+          services: [
+            {
+              serviceId: "base-test",
+              name: "Base Testnet",
+              cumulativeClaimedRelays: 69180,
+              cumulativeClaimedComputeUnits: 61293480,
+              cumulativeEstimatedComputeUnits: 61293480,
+            },
+          ],
+        },
+      },
+    }),
+  },
+  "GET /v1/pokt/validators": {
+    accepts: multiNetworkAccepts(0.03),
+    description:
+      "Pocket Network (Shannon) validator security/decentralization feed: bonded validator count, " +
+      "total POKT bonded network-wide, and each validator's TOTAL bonded stake (self + delegations " +
+      "-- true voting power, not just self-stake) with commission rate and jailed status.",
+    extensions: declareDiscoveryExtension({
+      input: { limit: "10" },
+      inputSchema: {
+        properties: {
+          limit: { type: "string", description: "Number of top validators to return, 1-25 (default 10)" },
+        },
+      },
+      output: {
+        example: {
+          network: "pocket-shannon",
+          bondedValidatorCount: 21,
+          totalBondedPokt: 8706223.72,
+          rankedBy: "bondedTokens",
+          validators: [
+            { moniker: "Validatus", bondedTokensPokt: 5552223.72, commissionRatePct: 5, jailed: false },
           ],
         },
       },

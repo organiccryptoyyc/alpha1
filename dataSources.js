@@ -13,6 +13,12 @@ const SOL_RPC_URL = process.env.SOL_RPC_URL || "https://api.mainnet-beta.solana.
 // public endpoints (publicnode, OnFinality, etc.) are fine for these
 // low-frequency snapshot calls; swap in a paid/private RPC if volume grows.
 const PEAQ_RPC_URL = process.env.PEAQ_RPC_URL || "https://peaq-rpc.publicnode.com";
+// BNB Smart Chain (BSC, chain ID 56) — same eth_* JSON-RPC interface as
+// Ethereum/peaq above, since BSC is EVM-compatible. Public default endpoint;
+// swap in a private/paid RPC if volume grows. (Data-source layer only — see
+// x402Middleware.js for the separate, NOT-YET-ACTIVE work needed before BSC
+// can be offered as a *payment* network too.)
+const BSC_RPC_URL = process.env.BSC_RPC_URL || "https://bsc-dataseed.binance.org";
 // If you stake POKT and run a gateway, point ETH_RPC_URL / SOL_RPC_URL at your
 // POKT gateway endpoint instead of the public defaults above — same interface,
 // you just become the infra layer instead of renting someone else's.
@@ -120,6 +126,45 @@ export async function getPeaqBalance(address) {
   };
 }
 
+// --- BNB Smart Chain (BSC, chain ID 56) ------------------------------------
+// Same eth_* JSON-RPC surface as Ethereum/peaq above — BSC is EVM-compatible.
+// Own "bsc" chain label for the same reason as peaq above: lets the catalog
+// price and list BSC data as its own distinct product. This data layer is
+// independent of, and ships ahead of, BSC's use as a *payment* network (see
+// x402Middleware.js) — these three routes are sellable via the existing
+// Solana/peaq payment rails today.
+export async function getBscGasPrice() {
+  const hex = await rpcCall(BSC_RPC_URL, "eth_gasPrice");
+  const wei = BigInt(hex);
+  return {
+    chain: "bsc",
+    wei: wei.toString(),
+    gwei: Number(wei) / 1e9,
+    fetchedAt: new Date().toISOString(),
+  };
+}
+
+export async function getBscLatestBlock() {
+  const hex = await rpcCall(BSC_RPC_URL, "eth_blockNumber");
+  return {
+    chain: "bsc",
+    blockNumber: parseInt(hex, 16),
+    fetchedAt: new Date().toISOString(),
+  };
+}
+
+export async function getBscBalance(address) {
+  const hex = await rpcCall(BSC_RPC_URL, "eth_getBalance", [address, "latest"]);
+  const wei = BigInt(hex);
+  return {
+    chain: "bsc",
+    address,
+    wei: wei.toString(),
+    bnb: Number(wei) / 1e18,
+    fetchedAt: new Date().toISOString(),
+  };
+}
+
 // --- peaq machine verification (peaqOS MCR API) -----------------------------
 // Sourced from peaq's own public, read-only Machine Credit Rating API
 // (https://mcr.peaq.xyz). No API key required -- all data originates from
@@ -195,6 +240,7 @@ export async function getTokenPrice(symbol) {
     btc: "bitcoin",
     usdc: "usd-coin",
     pokt: "pocket-network",
+    bnb: "binancecoin",
   };
   const id = idMap[symbol.toLowerCase()];
   if (!id) throw new Error(`Unsupported symbol: ${symbol}`);
@@ -210,7 +256,7 @@ export async function getTokenPrice(symbol) {
   };
 }
 
-// --- POKT Shannon service-demand snapshot ---------------------------------
+// --- POKT Shannon service-demand snapshot ----------------------------------
 // Sourced live from Pocket Network's public GraphQL indexer (Pocketdex).
 // This is deliberately NOT a price/RPC pass-through like everything above —
 // it sells relay-demand signal: which services (chains/APIs) are seeing the
@@ -559,7 +605,7 @@ export async function getPoktValidatorSecurity(limit = 10) {
   };
 }
 
-// --- UpRock real-device web fetch ------------------------------------------
+// --- UpRock real-device web fetch -----------------------------------------
 // Sourced from UpRock's residential/mobile device network (edge.uprock.com,
 // verified against their live API docs). UNLIKE everything else in this
 // file, this is NOT free: UpRock bills in credits ($0.006/credit on paid

@@ -167,14 +167,20 @@ const PEAQ_MAINNET = "eip155:3338";
 //
 // name/version here are the EIP-712 signing-domain fields the exact-EVM
 // scheme includes in payment requirements so a wallet can produce a valid
-// transferWithAuthorization signature — NOT display text. "USD Coin"/"2" is
-// Circle's fixed domain for every FiatTokenV2 deployment regardless of
-// chain; if the very first live peaq payment fails signature verification,
-// this is the first thing to re-check against the deployed contract itself.
+// transferWithAuthorization signature — NOT display text, and NOT
+// necessarily "USD Coin"/"2" despite that being Circle's usual FiatTokenV2
+// domain on most chains. CONFIRMED WRONG here: a live payment test on
+// 2026-08-03 failed with "invalid_exact_evm_token_name_mismatch", and
+// querying the deployed contract directly (name()/version() via eth_call)
+// showed its real on-chain name is "USDC", not "USD Coin" — version is "2"
+// as assumed. The facilitator checks the live contract's name()/version()
+// against these values before settling, so they must match byte-for-byte;
+// if a future peaq asset swap ever breaks a payment the same way again,
+// re-query the contract directly rather than assuming the usual default.
 const PEAQ_USDC = {
   address: "0xbbA60da06c2c5424f03f7434542280FCAd453d10",
   decimals: 6,
-  name: "USD Coin",
+  name: "USDC",
   version: "2",
 };
 

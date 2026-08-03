@@ -12,6 +12,11 @@ services:
     # Populated from Portainer's stack-level "Environment variables" UI at
     # deploy time (Repository build method substitutes ${VAR} references
     # here) - no .env file is committed to this repo or needed on the host.
+    # IMPORTANT: setting a value in Portainer's UI alone does NOT get it into
+    # the container -- it only fills in ${VAR} references that exist below.
+    # Every env var the app actually reads (see dataSources.js /
+    # x402Middleware.js) must have a line here too, or it silently never
+    # reaches the process no matter what Portainer shows.
     environment:
       PAY_TO_ADDRESS: ${PAY_TO_ADDRESS}
       CDP_API_KEY_ID: ${CDP_API_KEY_ID}
@@ -27,6 +32,15 @@ services:
       # payment requirements", even with a fully funded wallet.
       SOL_RPC_URL: http://sol-rpc-cache:3000
       PORT: ${PORT}
+      # Optional -- dataSources.js falls back to the public Pocketdex
+      # endpoint (https://data.pocket.network/graphql) if unset. Only set
+      # this in Portainer if you're pointing at a different POKT indexer.
+      POKT_GRAPHQL_URL: ${POKT_GRAPHQL_URL}
+      # Required for GET /v1/uprock/fetch -- sign up free at
+      # https://uprock.ai and set this in Portainer's stack env vars. Without
+      # it, that one route fails with "UPROCK_API_KEY is not set" but every
+      # other route is unaffected.
+      UPROCK_API_KEY: ${UPROCK_API_KEY}
     depends_on:
       - sol-rpc-cache
     healthcheck:

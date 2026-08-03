@@ -22,6 +22,17 @@ import {
 } from "./dataSources.js";
 
 const app = express();
+
+// Caddy sits in front of this app and terminates TLS, forwarding decrypted
+// traffic over the docker network with X-Forwarded-Proto: https. Without
+// this line, Express ignores that header and req.protocol falls back to
+// "http", which makes the x402 SDK build resource URLs as http://... --
+// Bazaar's discovery validator rejects those outright ("resource must start
+// with 'https://'"), silently breaking Bazaar listing/updates for every
+// route behind this proxy. trust proxy fixes req.protocol at the source
+// instead of patching each place that reads it.
+app.set("trust proxy", true);
+
 const PORT = process.env.PORT || 4021;
 
 // Short TTLs: long enough to absorb bursts of agent traffic hitting the same

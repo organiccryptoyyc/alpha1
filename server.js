@@ -9,7 +9,7 @@
 
 import express from "express";
 import NodeCache from "node-cache";
-import { buildX402Middleware } from "./x402Middleware.js";
+import { buildX402Middleware, routes } from "./x402Middleware.js";
 import {
   getEthGasPrice,
   getEthLatestBlock,
@@ -59,6 +59,70 @@ async function cached(key, ttl, fn) {
 // Free health check — not metered, so uptime monitors and Bazaar's crawler
 // can confirm the service is alive without paying for it.
 app.get("/health", (req, res) => res.json({ status: "ok" }));
+
+// PUBLIC_BASE_URL lets the manifest below emit correct absolute resource
+// URLs regardless of how the box is reached. Falls back to this domain's
+// known public address (Caddy terminates TLS on :8443 in front of this
+// container) so the manifest works even if the env var is never set.
+const PUBLIC_BASE_URL = process.env.PUBLIC_BASE_URL || "https://organiccryptoyyc.com:8443";
+
+// "Everything I sell, one link" — the emerging /.well-known/x402 discovery
+// convention (see e.g. awesome-x402, x402-discovery-mcp): a single
+// unauthenticated, unmetered manifest listing every paid resource on this
+// server with its price, network(s), payTo address, and input/output shape,
+// so an agent can learn your entire catalog in one GET instead of having to
+// already know about Bazaar, know your wallet address, or discover routes by
+// trial and error. Built directly from the `routes` export in
+// x402Middleware.js -- the same object that drives the live paywall and the
+// Bazaar discovery extensions -- so this can never drift out of sync with
+// what's actually for sale. Free/unmetered on purpose: an agent needs to be
+// able to read the price list before it can decide whether to pay for
+// anything, and requiring payment to see the menu defeats the point.
+function buildX402Manifest() {
+  const resources = Object.entries(routes).map(([routeKey, def]) => {
+    const [method, path] = routeKey.split(" ");
+    const bazaarInfo = def.extensions?.bazaar?.info;
+    return {
+      resource: PUBLIC_BASE_URL + path,
+      method,
+      type: "http",
+      x402Version: 2,
+      accepts: def.accepts,
+      metadata: {
+        description: def.description,
+        ...(bazaarInfo?.input ? { input: bazaarInfo.input } : {}),
+        ...(bazaarInfo?.output ? { output: bazaarInfo.output } : {}),
+      },
+    };
+  });
+  return {
+    x402Version: 2,
+    name: "organiccryptoyyc.com on-chain data API",
+    description:
+      "Metered on-chain/off-chain data snapshots, paid per-request via x402 in USDC. " +
+      "No API keys, no signup -- pay the quoted price and get JSON back.",
+    resources,
+    resourceCount: resources.length,
+    // Coinbase's own Bazaar discovery mirrors this same catalog once each
+    // route has settled at least one real payment through the CDP
+    // facilitator -- useful as a second, independently-hosted place to
+    // cross-check this list (and it's queryable by wallet address alone,
+    // no knowledge of this domain required).
+    alsoDiscoverableVia: {
+      bazaarSemanticSearch: "https://api.cdp.coinbase.com/platform/v2/x402/discovery/search",
+      bazaarMcpServer: "https://api.cdp.coinbase.com/platform/v2/x402/discovery/mcp",
+    },
+    lastUpdated: new Date().toISOString(),
+  };
+}
+
+// Canonical path per the /.well-known/x402 discovery convention, plus a
+// `.json` alias since some agent frameworks/crawlers expect an explicit
+// extension. Both unmetered -- placed above buildX402Middleware() so
+// paymentMiddleware never intercepts them.
+app.get(["/.well-known/x402", "/.well-known/x402.json"], (req, res) => {
+  res.json(buildX402Manifest());
+});
 
 // Metered routes below this line.
 app.use(buildX402Middleware());

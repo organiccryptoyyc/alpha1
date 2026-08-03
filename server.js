@@ -127,6 +127,149 @@ app.get(["/.well-known/x402", "/.well-known/x402.json"], (req, res) => {
   res.json(buildX402Manifest());
 });
 
+// --- /openapi.json: x402scan's discovery format (separate from Bazaar) -----
+// x402scan.com does NOT read /.well-known/x402 or the Bazaar extension -- it
+// has its own discovery convention ("Poncho"): an OpenAPI 3.1 document at
+// GET /openapi.json where every payable operation carries an `x-payment-info`
+// block (price + protocols) alongside a normal `402` response entry. Full
+// spec: https://www.x402scan.com/discovery/spec. Confirmed via their own
+// discovery probe (2026-08-03) that this origin currently returns "No
+// discovery spec found" without this file -- Bazaar/agentic.market listing
+// does not imply x402scan listing, they're independent indexes.
+//
+// Built the same way as buildX402Manifest() above: derived from the single
+// `routes` export in x402Middleware.js so it can't drift from what's
+// actually for sale. Path/query parameter schemas are read back out of each
+// route's Bazaar extension (extensions.bazaar.schema.properties.input...)
+// rather than re-declared here, so there's exactly one place (x402Middleware.js)
+// where a route's params are described.
+//
+// Per x402scan's own "Registration gate" rule: publishing this file makes
+// the API *discoverable* by their probe, but does NOT register/list it --
+// that's a separate, explicit action (POST to their registry) which their
+// own docs say should only happen after the deployed origin validates clean
+// AND the owner has explicitly approved. This file alone is safe to ship;
+// do not wire up automatic registration against x402scan's API without
+// asking first.
+function toPascalCase(segment) {
+  return segment
+    .split("-")
+    .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
+    .join("");
+}
+
+function buildOperationId(method, expressPath) {
+  const segments = expressPath.split("/").filter((s) => s && s !== "v1");
+  const parts = segments.map((s) => (s.startsWith(":") ? "By" + toPascalCase(s.slice(1)) : toPascalCase(s)));
+  return method.toLowerCase() + parts.join("");
+}
+
+function deriveTag(expressPath) {
+  const segments = expressPath.split("/").filter((s) => s && s !== "v1" && !s.startsWith(":"));
+  return segments[0] ? toPascalCase(segments[0]) : "General";
+}
+
+// Infers a JSON Schema shape from a plain JS example value -- used for the
+// 200 response schema so "Input/Output Schema Missing" doesn't fire on
+// operations that only declared an `output.example` (not a hand-written
+// schema) in their Bazaar discovery extension.
+function inferJsonSchema(value) {
+  if (value === null || value === undefined) return { type: "string" };
+  if (Array.isArray(value)) {
+    return { type: "array", items: value.length ? inferJsonSchema(value[0]) : {} };
+  }
+  const t = typeof value;
+  if (t === "number") return { type: Number.isInteger(value) ? "integer" : "number" };
+  if (t === "boolean") return { type: "boolean" };
+  if (t === "object") {
+    const properties = {};
+    for (const [k, v] of Object.entries(value)) properties[k] = inferJsonSchema(v);
+    return { type: "object", properties };
+  }
+  return { type: "string" };
+}
+
+function schemaPropertiesToParameters(schema, location) {
+  if (!schema?.properties) return [];
+  const required = schema.required || [];
+  return Object.entries(schema.properties).map(([name, propSchema]) => ({
+    name,
+    in: location,
+    required: required.includes(name),
+    schema: { type: propSchema.type || "string" },
+    ...(propSchema.description ? { description: propSchema.description } : {}),
+  }));
+}
+
+function buildOpenApiSpec() {
+  const paths = {};
+  for (const [routeKey, def] of Object.entries(routes)) {
+    const [method, expressPath] = routeKey.split(" ");
+    const openApiPath = expressPath.replace(/:([a-zA-Z0-9_]+)/g, "{$1}");
+    const bazaarSchema = def.extensions?.bazaar?.schema?.properties?.input?.properties;
+    const outputExample = def.extensions?.bazaar?.info?.output?.example;
+    // The Solana accept entry's price is always the "$0.005"-style string
+    // (see multiNetworkAccepts() in x402Middleware.js) -- one canonical USD
+    // amount per route regardless of how many networks it's payable on.
+    const solAccept = def.accepts.find((a) => typeof a.price === "string");
+    const amount = solAccept ? solAccept.price.replace("$", "") : "0.00";
+
+    const parameters = [
+      ...schemaPropertiesToParameters(bazaarSchema?.pathParams, "path"),
+      ...schemaPropertiesToParameters(bazaarSchema?.queryParams, "query"),
+    ];
+
+    if (!paths[openApiPath]) paths[openApiPath] = {};
+    paths[openApiPath][method.toLowerCase()] = {
+      operationId: buildOperationId(method, expressPath),
+      summary: def.description.length > 90 ? def.description.slice(0, 87) + "..." : def.description,
+      description: def.description,
+      tags: [deriveTag(expressPath)],
+      ...(parameters.length ? { parameters } : {}),
+      "x-payment-info": {
+        price: { mode: "fixed", currency: "USD", amount },
+        protocols: [{ x402: {} }],
+      },
+      responses: {
+        "200": {
+          description: "Successful response",
+          content: {
+            "application/json": {
+              schema: outputExample ? { ...inferJsonSchema(outputExample), example: outputExample } : { type: "object" },
+            },
+          },
+        },
+        "402": { description: "Payment Required" },
+      },
+    };
+  }
+
+  return {
+    openapi: "3.1.0",
+    info: {
+      title: "organiccryptoyyc.com on-chain data API",
+      version: "1.0.0",
+      description:
+        "Metered on-chain/off-chain data snapshots, paid per-request via x402 in USDC. " +
+        "No API keys, no signup -- pay the quoted price and get JSON back.",
+      "x-guidance":
+        "Every route below is a plain GET request metered with x402 (HTTP 402). Call a route " +
+        "unauthenticated first: you'll get a 402 with an `accepts` array listing price/network/payTo " +
+        "options (USDC on Solana and, where available, peaq). Pay one of those options and retry the " +
+        "same request with payment proof to get JSON back. No API keys, accounts, or subscriptions. " +
+        "See /.well-known/x402 for the equivalent Bazaar-style manifest of this same catalog.",
+    },
+    servers: [{ url: PUBLIC_BASE_URL }],
+    paths,
+  };
+}
+
+// Unmetered, same reasoning as /.well-known/x402 above: an agent needs to be
+// able to read this before deciding whether to pay for anything.
+app.get("/openapi.json", (req, res) => {
+  res.json(buildOpenApiSpec());
+});
+
 // Metered routes below this line.
 app.use(buildX402Middleware());
 

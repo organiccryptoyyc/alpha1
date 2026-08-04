@@ -454,6 +454,44 @@ export const routes = {
           bondStatus: "bonded",
           negativeFlag: false,
           eventCount: 12,
+          services: [{ name: "web", endpoint: "https://example.com/api" }],
+          documentationUrl: "https://example.com/docs",
+          dataVisibility: "onchain",
+        },
+      },
+    }),
+  },
+  // Cheap, boring, high-frequency utility -- deliberately priced at the
+  // bottom of this catalog's range. Live market check (x402scan, 2026-08-03)
+  // showed a near-identical bare-bones IP-lookup service outperforming every
+  // narrow crypto-signal product on the platform by orders of magnitude on
+  // transaction count (1.87K txns/117 buyers in 30 days vs. low-single-digit
+  // or zero for niche trading-signal APIs) -- simple + cheap + broadly
+  // useful beats narrow + expensive here. Sourced from FreeIPAPI, free and
+  // keyless, same positioning as the rest of this catalog.
+  "GET /v1/geo/ip/:ip": {
+    accepts: multiNetworkAccepts(0.003),
+    description: "Geolocate an IPv4 or IPv6 address: country, region, city, lat/long, timezone, ISP/ASN, and proxy flag.",
+    extensions: declareDiscoveryExtension({
+      pathParams: { ip: "8.8.8.8" },
+      pathParamsSchema: {
+        properties: { ip: { type: "string", description: "IPv4 or IPv6 address to geolocate" } },
+        required: ["ip"],
+      },
+      output: {
+        example: {
+          source: "freeipapi",
+          ip: "8.8.8.8",
+          country: "United States",
+          countryCode: "US",
+          region: "California",
+          city: "Mountain View",
+          latitude: 37.422,
+          longitude: -122.085,
+          timezone: "America/Los_Angeles",
+          isp: "Google LLC",
+          asn: "15169",
+          isProxy: false,
         },
       },
     }),

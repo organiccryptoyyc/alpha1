@@ -211,6 +211,33 @@ export async function getPeaqMachineVerification(didOrAddress) {
     throw new Error(`peaqOS MCR lookup failed for ${did}: ${detail}`);
   }
 
+  // Best-effort enrichment from the same MCR API's /machines/{machine_id}
+  // endpoint (no extra key, same host, numeric ID from the /mcr/ response
+  // above) -- carries a machine's advertised service endpoints,
+  // documentation URL, and data-visibility setting, none of which /mcr/{did}
+  // itself returns. NOTE: deliberately NOT /machine/{did} (singular) -- that
+  // sibling endpoint nests everything under a `peaqos` key and has no
+  // `services` field at all; live-verified both shapes 2026-08-03 against
+  // machine_id 1 before picking this one. Failure here is non-fatal: the MCR
+  // fields above are the core paid product, this is additive bonus data, so
+  // a hiccup on this second call shouldn't fail the whole request.
+  let services = null;
+  let documentationUrl = null;
+  let dataVisibility = null;
+  if (json.machine_id != null) {
+    try {
+      const machineRes = await fetch(`${PEAQOS_MCR_API_URL}/machines/${json.machine_id}`);
+      if (machineRes.ok) {
+        const machineJson = await machineRes.json();
+        services = machineJson.services ?? null;
+        documentationUrl = machineJson.documentation_url ?? null;
+        dataVisibility = machineJson.data_visibility ?? null;
+      }
+    } catch {
+      // Non-fatal -- enrichment only, see comment above.
+    }
+  }
+
   return {
     source: "peaqos-mcr",
     registered: true,
@@ -227,6 +254,43 @@ export async function getPeaqMachineVerification(didOrAddress) {
     revenueTrend: json.revenue_trend,
     totalRevenueUsdCents: json.total_revenue,
     lastUpdated: json.last_updated,
+    services,
+    documentationUrl,
+    dataVisibility,
+    fetchedAt: new Date().toISOString(),
+  };
+}
+
+// --- IP geolocation ---------------------------------------------------------
+// Sourced from FreeIPAPI (free.freeipapi.com) -- a free, keyless IP
+// geolocation lookup explicitly permitted for commercial use (no attribution
+// or paid tier required for this endpoint). Verified live 2026-08-03:
+// looking up 8.8.8.8 returned Mountain View, CA with lat/long, timezone,
+// ASN/ISP, and a proxy flag. Rate limit on their side is 60 req/min, well
+// above what a cached per-IP lookup needs. Same "no API keys" positioning as
+// every other route in this file.
+const IP_GEO_BASE_URL = process.env.IP_GEO_BASE_URL || "https://free.freeipapi.com/api/json";
+
+export async function getIpGeolocation(ip) {
+  const res = await fetch(`${IP_GEO_BASE_URL}/${encodeURIComponent(ip)}`);
+  const json = await res.json().catch(() => null);
+  if (!res.ok) {
+    const detail = json?.message || `HTTP ${res.status}`;
+    throw new Error(`IP geolocation lookup failed for ${ip}: ${detail}`);
+  }
+  return {
+    source: "freeipapi",
+    ip: json.ipAddress ?? ip,
+    country: json.countryName ?? null,
+    countryCode: json.countryCode ?? null,
+    region: json.regionName ?? null,
+    city: json.cityName ?? null,
+    latitude: json.latitude ?? null,
+    longitude: json.longitude ?? null,
+    timezone: json.timeZones?.[0] ?? null,
+    isp: json.asnOrganization ?? null,
+    asn: json.asn ?? null,
+    isProxy: json.isProxy ?? null,
     fetchedAt: new Date().toISOString(),
   };
 }
@@ -256,7 +320,7 @@ export async function getTokenPrice(symbol) {
   };
 }
 
-// --- POKT Shannon service-demand snapshot ----------------------------------
+// --- POKT Shannon service-demand snapshot ---------------------------------
 // Sourced live from Pocket Network's public GraphQL indexer (Pocketdex).
 // This is deliberately NOT a price/RPC pass-through like everything above —
 // it sells relay-demand signal: which services (chains/APIs) are seeing the
@@ -315,7 +379,7 @@ export async function getPoktServiceDemand(limit = 10) {
     const cur = Number(s.newNumRelaysEma);
     const pctChange = prev > 0 ? ((cur - prev) / prev) * 100 : null;
     const trend =
-      pctChange === null ? "unknown" : pctChange > 1 ? "rising" : pctChange < -1 ? "falling" : "flat";
+      pctChange === null : "unknown" : pctChange > 1 ? "rising" : pctChange < -1 ? "falling" : "flat";
     return {
       serviceId: s.id,
       name: s.name,
@@ -605,7 +669,7 @@ export async function getPoktValidatorSecurity(limit = 10) {
   };
 }
 
-// --- UpRock real-device web fetch -----------------------------------------
+// --- UpRock real-device web fetch ------------------------------------------
 // Sourced from UpRock's residential/mobile device network (edge.uprock.com,
 // verified against their live API docs). UNLIKE everything else in this
 // file, this is NOT free: UpRock bills in credits ($0.006/credit on paid

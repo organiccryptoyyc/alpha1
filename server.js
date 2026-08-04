@@ -31,6 +31,7 @@ import {
   getBscGasPrice,
   getBscLatestBlock,
   getBscBalance,
+  getIpGeolocation,
 } from "./dataSources.js";
 
 const app = express();
@@ -322,6 +323,24 @@ app.get("/v1/wallet/balance/:chain/:address", async (req, res, next) => {
         : null;
     if (!fn) return res.status(400).json({ error: "chain must be 'eth', 'sol', 'peaq', or 'bsc'" });
     res.json(await cached(key, 6, fn));
+  } catch (err) {
+    next(err);
+  }
+});
+
+// IP geolocation. Long TTL (3600s) relative to the RPC routes above --
+// unlike gas price or block height, which chain/country an IP resolves to
+// almost never changes minute to minute, so a tight cache would just burn
+// FreeIPAPI's rate limit for no fresher data.
+const IPV4_RE = /^(\d{1,3}\.){3}\d{1,3}$/;
+const IPV6_RE = /^[0-9a-fA-F:]+$/;
+app.get("/v1/geo/ip/:ip", async (req, res, next) => {
+  try {
+    const { ip } = req.params;
+    const isV4 = IPV4_RE.test(ip) && ip.split(".").every((oct) => Number(oct) <= 255);
+    const isV6 = ip.includes(":") && IPV6_RE.test(ip);
+    if (!isV4 && !isV6) return res.status(400).json({ error: "ip must be a valid IPv4 or IPv6 address" });
+    res.json(await cached(`geo:ip:${ip}`, 3600, () => getIpGeolocation(ip)));
   } catch (err) {
     next(err);
   }

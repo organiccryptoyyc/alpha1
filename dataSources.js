@@ -379,7 +379,7 @@ export async function getPoktServiceDemand(limit = 10) {
     const cur = Number(s.newNumRelaysEma);
     const pctChange = prev > 0 ? ((cur - prev) / prev) * 100 : null;
     const trend =
-      pctChange === null : "unknown" : pctChange > 1 ? "rising" : pctChange < -1 ? "falling" : "flat";
+      pctChange === null ? "unknown" : pctChange > 1 ? "rising" : pctChange < -1 ? "falling" : "flat";
     return {
       serviceId: s.id,
       name: s.name,

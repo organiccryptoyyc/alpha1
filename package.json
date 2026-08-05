@@ -17,6 +17,7 @@
     "@x402/extensions": "^2.20.0",
     "@x402/svm": "^2.20.0",
     "express": "^4.19.2",
+    "express-rate-limit": "^7.4.1",
     "node-cache": "^5.1.2"
   },
   "engines": {

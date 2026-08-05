@@ -745,6 +745,36 @@ async function uprockCrawl(targetUrl, { timeoutSec = 20, maxWaitMs = 20000, poll
   return { jobId, result };
 }
 
+// SECURITY (SSRF hardening, reviewed 2026-08-04): this route accepts a
+// buyer-supplied URL and hands it to UpRock's residential/mobile device
+// network -- an arbitrary-fetch primitive available to anyone holding a
+// stablecoin, no identity attached. The fetch itself executes on UpRock's
+// device (not this container), so it isn't a classic SSRF-into-our-own-
+// docker-network vector, but nothing stopped a buyer from pointing a real
+// residential device at a target's internal/loopback/link-local address
+// (including cloud metadata endpoints like 169.254.169.254) with zero
+// filtering. This blocks the obvious literal-hostname/IP cases. It is NOT
+// a complete defense: a hostname that resolves to a private/loopback address
+// only at DNS time (DNS rebinding) would slip through this check, since it
+// only inspects the string the buyer supplied, not what it resolves to.
+// Closing that gap needs a resolve-then-recheck step (and ideally the same
+// check repeated by UpRock's own crawler); flagged here, not yet built.
+const BLOCKED_HOSTNAMES = new Set(["localhost", "0.0.0.0", "[::1]", "::1"]);
+const BLOCKED_HOSTNAME_PATTERNS = [
+  /^127\./, // IPv4 loopback (127.0.0.0/8)
+  /^10\./, // RFC1918 private
+  /^192\.168\./, // RFC1918 private
+  /^172\.(1[6-9]|2\d|3[01])\./, // RFC1918 private (172.16.0.0/12)
+  /^169\.254\./, // link-local, incl. cloud metadata (169.254.169.254)
+  /^fe80:/i, // IPv6 link-local
+  /^fc[0-9a-f]{2}:|^fd[0-9a-f]{2}:/i, // IPv6 unique local (fc00::/7)
+];
+function isBlockedTarget(hostname) {
+  const h = hostname.toLowerCase();
+  if (BLOCKED_HOSTNAMES.has(h)) return true;
+  return BLOCKED_HOSTNAME_PATTERNS.some((re) => re.test(h));
+}
+
 export async function getUprockFetch(targetUrl) {
   if (!targetUrl) throw new Error("url query param is required");
   let parsed;
@@ -755,6 +785,9 @@ export async function getUprockFetch(targetUrl) {
   }
   if (!["http:", "https:"].includes(parsed.protocol)) {
     throw new Error("url must use http or https");
+  }
+  if (isBlockedTarget(parsed.hostname)) {
+    throw new Error("url must not target a localhost, private, or link-local address");
   }
 
   const { jobId, result } = await uprockCrawl(parsed.toString());

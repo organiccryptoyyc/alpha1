@@ -72,6 +72,16 @@ if (!process.env.CDP_API_KEY_ID || !process.env.CDP_API_KEY_SECRET) {
 }
 const facilitatorClient = new HTTPFacilitatorClient(facilitator);
 
+// SECURITY (key custody, reviewed 2026-08-04): this app holds NO signing key
+// for the Solana/CDP path above -- CDP_API_KEY_ID/SECRET is a bearer API key
+// that authenticates calls to Coinbase's hosted facilitator, not a private
+// key. The buyer's own wallet signs their payment authorization client-side;
+// CDP verifies and submits it on-chain using its own infrastructure. This
+// app never custodies a Solana signing key at any point. Contrast with the
+// self-hosted peaq facilitator (peaq-facilitator.js), which DOES hold a real
+// private key (FACILITATOR_PRIVATE_KEY) -- see that file's header for the
+// max-loss-if-leaked analysis (gas-only, distinct from the payout wallet).
+
 // Self-hosted peaq facilitator (peaq-facilitator.js, deployed as its own
 // docker-compose service). Replaces PayAI, which was confirmed (live
 // /supported check, prior session) to NOT actually advertise eip155:3338

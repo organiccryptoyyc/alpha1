@@ -9,6 +9,7 @@
 
 import express from "express";
 import NodeCache from "node-cache";
+import rateLimit from "express-rate-limit";
 import { buildX402Middleware, routes } from "./x402Middleware.js";
 import {
   getEthGasPrice,
@@ -44,12 +45,50 @@ const app = express();
 // with 'https://'"), silently breaking Bazaar listing/updates for every
 // route behind this proxy. trust proxy fixes req.protocol at the source
 // instead of patching each place that reads it.
-app.set("trust proxy", true);
+//
+// Security review, 2026-08-04: this was `true` (trust every hop in
+// X-Forwarded-For), which express-rate-limit correctly refused to run
+// under -- trusting an unbounded chain of proxies means a client can set
+// its own X-Forwarded-For header and present a different "IP" on every
+// request, defeating IP-based rate limiting entirely. There is exactly one
+// proxy in front of this app (Caddy -- see Caddyfile/docker-compose.yml),
+// so `1` (trust exactly one hop) is both correct for this topology and the
+// fix the rate limiter needed. If a CDN or a second proxy is ever added in
+// front of Caddy, this number needs to go up to match, not back to `true`.
+app.set("trust proxy", 1);
+
+// Security review, 2026-08-04: nothing in this app throttled request volume
+// before this -- the 402 handshake is free by design (an agent has to be
+// able to see the price before paying) and the discovery manifests
+// (/.well-known/x402, /openapi.json) are deliberately unmetered, so both
+// were pure free-work amplification vectors with zero cost to an attacker.
+// A flat per-IP window here doesn't touch the payment logic at all -- it
+// just stops any single source from hammering route lookups, manifest
+// rebuilds, or 402 responses. Deliberately excludes /health so Docker's own
+// healthcheck (which polls frequently, from inside the docker network) can
+// never trip it and cause a false "unhealthy" restart loop.
+const limiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 120, // ~2 req/sec/IP average -- generous for a real paying agent, tight for a scraper
+  standardHeaders: true,
+  legacyHeaders: false,
+  skip: (req) => req.path === "/health",
+  message: { error: "rate limit exceeded, try again shortly" },
+});
+app.use(limiter);
 
 const PORT = process.env.PORT || 4021;
 
 // Short TTLs: long enough to absorb bursts of agent traffic hitting the same
 // route within a few seconds, short enough that the data stays honest.
+//
+// IMPORTANT (security review, 2026-08-04): this cache sits BELOW the x402
+// payment middleware (see app.use(buildX402Middleware()) below) -- every
+// request, cache hit or miss, must clear payment verify/settle before this
+// function is ever called. A cache hit only skips the upstream RPC/API call;
+// it never skips the charge. There is no free-rider path here. Do not read
+// "absorbs bursts without re-hitting upstreams" as "absorbs bursts without
+// re-charging" -- those are different claims and only the first one is true.
 const cache = new NodeCache({ stdTTL: 8, checkperiod: 4 });
 
 async function cached(key, ttl, fn) {

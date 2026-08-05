@@ -152,6 +152,10 @@ credentials, (2) an RSA-SHA256 request-signing implementation in that
 function, (3) a real end-to-end payment test before trusting it — no other
 code changes required.
 
+## Security hardening (2026-08-04)
+
+An external review of this project's architecture doc surfaced eight points -- idempotency/replay, cache-vs-metering wording, settlement-before-fetch (no refund path on upstream failure), the real-device fetch route's open SSRF surface, key-custody documentation, missing rate limiting, routes-as-code-vs-data, and horizontal-scaling caveats. Rate limiting (`express-rate-limit`, 120 req/min/IP, `/health` exempt), an SSRF denylist on `/v1/uprock/fetch` (blocks localhost/private/link-local targets), a `trust proxy` misconfiguration found while wiring up the rate limiter, and two documentation fixes are live as of this commit. Settlement-before-fetch and idempotency/replay are real, unresolved gaps -- the first needs a design decision (deferred-settle vs. refund) before a code fix, the second needs an adversarial test before it can be called handled. Full writeup with status per item: `ARCHITECTURE.md` §10.
+
 ## Routes and pricing
 
 | Route | Price | What it returns |

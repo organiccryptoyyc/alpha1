@@ -689,12 +689,17 @@ export async function getPoktValidatorSecurity(limit = 10) {
 const UPROCK_BASE_URL = process.env.UPROCK_BASE_URL || "https://edge.uprock.com";
 const UPROCK_API_KEY = process.env.UPROCK_API_KEY;
 
-async function uprockRequest(path, options = {}) {
+// PATCH: optional third param so callers can supply a DIFFERENT UpRock API
+// key than UPROCK_API_KEY above (see UPROCK_VERIFY_API_KEY / getUprockVerify
+// further down) -- defaults to the original behavior exactly when omitted,
+// so the existing getUprockFetch call path below is byte-for-byte unchanged.
+async function uprockRequest(path, options = {}, apiKeyOverride) {
+  const apiKey = apiKeyOverride ?? UPROCK_API_KEY;
   const res = await fetch(`${UPROCK_BASE_URL}${path}`, {
     ...options,
     headers: {
       "content-type": "application/json",
-      ...(UPROCK_API_KEY ? { authorization: `Bearer ${UPROCK_API_KEY}` } : {}),
+      ...(apiKey ? { authorization: `Bearer ${apiKey}` } : {}),
       ...options.headers,
     },
   });
@@ -803,6 +808,168 @@ export async function getUprockFetch(targetUrl) {
     statusCode: result?.mainResult?.statusCode ?? null,
     success: result?.mainResult?.success ?? null,
     content,
+    fetchedAt: new Date().toISOString(),
+  };
+}
+
+
+// --- UpRock Verify (multi-region sweep) -------------------------------------
+// PATCH (built 2026-08-08, staged offline -- not yet live-tested against a
+// real payment, same status every other new network/route in this project
+// has carried before its first real test). Sourced from the SAME
+// edge.uprock.com API as getUprockFetch above, but a different UpRock
+// resource: Sweep, not Crawl. A sweep launches one crawl job per region in
+// parallel and returns per-region reachability, Core Web Vitals (LCP/FCP/
+// CLS/TTFB), total load time, and a screenshot per region -- this is what
+// UpRock's own "Verify" product is built on top of (their own API docs
+// literally title this endpoint "Create a new deploy validation sweep").
+// Endpoint paths confirmed directly against UpRock's live API reference
+// docs 2026-08-08 (POST /crawl/v1/sweep/new, GET /crawl/v1/sweep/{id}), not
+// assumed -- the status-poll path in particular does NOT follow the same
+// shape as the existing crawl-job poll above (/crawl/v1/status/{id}), so
+// this deliberately does not try to reuse that helper.
+//
+// Uses a SEPARATE API key (UPROCK_VERIFY_API_KEY) from UPROCK_API_KEY above,
+// per request: separate UpRock accounts/keys per service line make it
+// possible to see exactly which product line is driving UpRock credit spend
+// from UpRock's own dashboard, without digging through this app's logs.
+// Falls back to UPROCK_API_KEY if a dedicated key hasn't been minted yet, so
+// this route doesn't hard-fail on a missing second key -- same
+// graceful-degrade posture as every other optional config in this file.
+const UPROCK_VERIFY_API_KEY = process.env.UPROCK_VERIFY_API_KEY || UPROCK_API_KEY;
+
+// Bounded on purpose: an unbounded region/tries selection would turn one
+// x402-paid request into an open-ended number of UpRock-billed jobs. Default
+// is 3 of UpRock's 5 available regions (NA/EU/APAC -- the same three used in
+// UpRock's own createSweep API example) at 1 try per region, not their API
+// default of 3 tries -- this is a reachability/screenshot check, not a
+// statistical load test, and every additional try is a real additional
+// billed job.
+const VERIFY_ALL_REGIONS = ["NA", "EU", "APAC", "LATAM", "MEA"];
+const VERIFY_DEFAULT_REGIONS = ["NA", "EU", "APAC"];
+const VERIFY_DEFAULT_TRIES_PER_REGION = 1;
+const VERIFY_DEFAULT_TIMEOUT_SEC = 30;
+// A sweep (multi-region navigation + screenshot capture) is slower than the
+// plain single-page crawl getUprockFetch polls for above, so this gets a
+// longer ceiling and a longer poll interval to match -- no point polling
+// every second for a job that reliably takes 15-30s per region.
+const VERIFY_MAX_WAIT_MS = 45000;
+const VERIFY_POLL_MS = 2000;
+
+async function uprockSweepCreate({ url, regions, triesPerRegion, timeoutSec, apiKey }) {
+  return uprockRequest(
+    "/crawl/v1/sweep/new",
+    {
+      method: "POST",
+      body: JSON.stringify({
+        url,
+        regions,
+        tries_per_region: triesPerRegion,
+        timeout_sec: timeoutSec,
+        device_type: "mobile",
+      }),
+    },
+    apiKey
+  );
+}
+
+async function uprockSweepStatus(sweepId, apiKey) {
+  return uprockRequest(`/crawl/v1/sweep/${sweepId}`, {}, apiKey);
+}
+
+// Polls a sweep until every region reports a terminal status, bounded by
+// maxWaitMs so a slow or stuck region can't hang an x402-paid request
+// forever. Returns the last status payload either way (with timedOut set) --
+// the caller decides what a partial/timed-out sweep means for its response,
+// rather than this helper silently throwing away partial regional data.
+async function pollSweepUntilDone(sweepId, apiKey, { maxWaitMs = VERIFY_MAX_WAIT_MS, pollMs = VERIFY_POLL_MS } = {}) {
+  const deadline = Date.now() + maxWaitMs;
+  let last = await uprockSweepStatus(sweepId, apiKey);
+
+  while (Date.now() < deadline) {
+    const regionStatuses = Object.values(last.results || {}).map((r) => r.status);
+    const allTerminal =
+      regionStatuses.length > 0 &&
+      regionStatuses.every((s) => s === "completed" || s === "failed" || s === "error");
+    if (allTerminal || last.status === "completed" || last.status === "failed") {
+      return { ...last, timedOut: false };
+    }
+    await new Promise((r) => setTimeout(r, pollMs));
+    last = await uprockSweepStatus(sweepId, apiKey);
+  }
+
+  return { ...last, timedOut: true };
+}
+
+// Accepts a bare domain (path param, e.g. "example.com"), not a full URL --
+// reuses the same SSRF hardening as getUprockFetch above (isBlockedTarget),
+// since this is the same "buyer-supplied target handed to UpRock's device
+// network" shape as the fetch route, just always coerced to https:// rather
+// than accepting an arbitrary scheme.
+export async function getUprockVerify(domain, { regions } = {}) {
+  if (!domain) throw new Error("domain is required");
+  const trimmed = String(domain).trim().replace(/^https?:\/\//i, "").replace(/\/.*$/, "");
+  if (!trimmed) throw new Error("domain must not be empty");
+  if (isBlockedTarget(trimmed.split(":")[0])) {
+    throw new Error("domain must not be a localhost, private, or link-local address");
+  }
+
+  const selectedRegions = Array.isArray(regions) && regions.length > 0 ? regions : VERIFY_DEFAULT_REGIONS;
+  const validRegions = selectedRegions.filter((r) => VERIFY_ALL_REGIONS.includes(r));
+  if (validRegions.length === 0) {
+    throw new Error(`regions must be one or more of ${VERIFY_ALL_REGIONS.join(", ")}`);
+  }
+
+  if (!UPROCK_VERIFY_API_KEY) {
+    throw new Error(
+      "UPROCK_VERIFY_API_KEY (or UPROCK_API_KEY as a fallback) is not set -- sign up free at https://uprock.ai"
+    );
+  }
+
+  const targetUrl = `https://${trimmed}`;
+  const created = await uprockSweepCreate({
+    url: targetUrl,
+    regions: validRegions,
+    triesPerRegion: VERIFY_DEFAULT_TRIES_PER_REGION,
+    timeoutSec: VERIFY_DEFAULT_TIMEOUT_SEC,
+    apiKey: UPROCK_VERIFY_API_KEY,
+  });
+
+  const final = await pollSweepUntilDone(created.sweep_id, UPROCK_VERIFY_API_KEY);
+
+  // Response deliberately omits the raw screenshot payload (likely base64,
+  // potentially large) -- same "don't blow up the response" discipline as
+  // getUprockFetch's 20k-char content cap above. hasScreenshot tells the
+  // caller one was captured; fetching the actual image bytes is a future
+  // extension (e.g. a signed URL or a separate download route), not built
+  // here.
+  const regionResults = Object.values(final.results || {}).map((r) => {
+    const job = r.jobs?.[0]; // one try per region by default -- see VERIFY_DEFAULT_TRIES_PER_REGION
+    return {
+      region: r.region,
+      status: r.status,
+      country: job?.country ?? null,
+      reachable: job?.status === "completed" && !job?.error_type,
+      loadTimeMs: job?.metrics?.total_load_time ?? null,
+      ttfbMs: job?.metrics?.ttfb ?? null,
+      lcpMs: job?.metrics?.lcp ?? null,
+      clsScore: job?.metrics?.cls ?? null,
+      hasScreenshot: Boolean(job?.screenshot),
+      errorType: job?.error_type ?? null,
+      errorMessage: job?.error_message ?? null,
+    };
+  });
+
+  return {
+    source: "uprock-verify-sweep",
+    domain: trimmed,
+    url: targetUrl,
+    sweepId: created.sweep_id,
+    regions: regionResults,
+    completedJobs: final.completed_jobs ?? null,
+    failedJobs: final.failed_jobs ?? null,
+    totalJobs: final.total_jobs ?? null,
+    timedOut: Boolean(final.timedOut),
     fetchedAt: new Date().toISOString(),
   };
 }

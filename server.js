@@ -11,6 +11,9 @@ import express from "express";
 import NodeCache from "node-cache";
 import rateLimit from "express-rate-limit";
 import { buildX402Middleware, routes } from "./x402Middleware.js";
+// PATCH (2026-08-08): participant allowlist middleware -- see allowlist.js
+// for the full design (off by default, three modes: off/log/enforce).
+import { allowlistMiddleware } from "./allowlist.js";
 import {
   getEthGasPrice,
   getEthLatestBlock,
@@ -25,6 +28,7 @@ import {
   getPoktThroughputLeaderboard,
   getPoktValidatorSecurity,
   getUprockFetch,
+  getUprockVerify,
   getPeaqGasPrice,
   getPeaqLatestBlock,
   getPeaqBalance,
@@ -311,6 +315,11 @@ app.get("/openapi.json", (req, res) => {
 });
 
 // Metered routes below this line.
+// PATCH (2026-08-08): allowlist gate mounted BEFORE the payment middleware
+// -- a blocked caller should never even see a 402 payment prompt for a
+// route it isn't allowed to use. Off by default (ALLOWLIST_MODE unset),
+// so this is a no-op until explicitly configured -- see allowlist.js.
+app.use(allowlistMiddleware());
 app.use(buildX402Middleware());
 
 app.get("/v1/eth/gas-price", async (req, res, next) => {
@@ -513,6 +522,25 @@ app.get("/v1/uprock/fetch", async (req, res, next) => {
     const { url } = req.query;
     if (!url) return res.status(400).json({ error: "url query param is required" });
     res.json(await cached(`uprock:${url}`, 180, () => getUprockFetch(url)));
+  } catch (err) {
+    next(err);
+  }
+});
+
+// UpRock Verify (multi-region sweep). PATCH (2026-08-08). 300s TTL -- each
+// call is a multi-region sweep (real UpRock-billed jobs, plural), so a
+// cache hit here saves real credit spend, same rationale as /v1/uprock/fetch
+// above but a longer window since a domain's verification status doesn't
+// need to be fresher than a few minutes for most callers.
+app.get("/v1/uprock/verify/:domain", async (req, res, next) => {
+  try {
+    const { domain } = req.params;
+    const regions =
+      typeof req.query.regions === "string"
+        ? req.query.regions.split(",").map((r) => r.trim().toUpperCase()).filter(Boolean)
+        : undefined;
+    const cacheKey = `uprock:verify:${domain}:${regions ? regions.join(",") : "default"}`;
+    res.json(await cached(cacheKey, 300, () => getUprockVerify(domain, { regions })));
   } catch (err) {
     next(err);
   }

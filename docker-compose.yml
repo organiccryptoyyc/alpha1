@@ -74,6 +74,25 @@ services:
       # partner credentials exist, is setting this value and redeploying --
       # no further code changes needed.
       BSC_PAY_TO_ADDRESS: ${BSC_PAY_TO_ADDRESS}
+      # PATCH (UpRock Verify -- GET /v1/uprock/verify/:domain): a SEPARATE
+      # UpRock API key from UPROCK_API_KEY above, on request -- separate
+      # UpRock accounts/keys per service line let you see exactly which
+      # product line is driving UpRock credit spend from UpRock's own
+      # dashboard, without digging through this app's logs. Falls back to
+      # UPROCK_API_KEY in code if left unset, so this route doesn't hard-fail
+      # just because a second key hasn't been minted yet -- same
+      # graceful-degrade pattern as everything else here.
+      UPROCK_VERIFY_API_KEY: ${UPROCK_VERIFY_API_KEY}
+      # PATCH (participant allowlist -- see allowlist.js for the full
+      # design). "off" (or unset) by default -- every metered route behaves
+      # exactly as before. Set to "log" first to see who's calling without
+      # blocking anyone, then "enforce" once ALLOWLIST_KEYS is populated.
+      # ALLOWLIST_KEYS is a comma-separated list of accepted values for the
+      # X-Alpha7-Key request header. NOTE: if you set ALLOWLIST_MODE=enforce
+      # without setting ALLOWLIST_KEYS, every metered request gets rejected
+      # -- that's fail-closed by design, not a bug, see allowlist.js.
+      ALLOWLIST_MODE: ${ALLOWLIST_MODE}
+      ALLOWLIST_KEYS: ${ALLOWLIST_KEYS}
     depends_on:
       - sol-rpc-cache
     healthcheck:

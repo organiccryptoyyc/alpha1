@@ -131,7 +131,7 @@ function buildX402Manifest() {
     const bazaarInfo = def.extensions?.bazaar?.info;
     return {
       resource: PUBLIC_BASE_URL + path,
-      method,
+        method,
       type: "http",
       x402Version: 2,
       accepts: def.accepts,
@@ -144,10 +144,12 @@ function buildX402Manifest() {
   });
   return {
     x402Version: 2,
-    name: "organiccryptoyyc.com on-chain data API",
+    name: "organiccryptoyyc.com — Multi-Region Verification & On-Chain Data API",
     description:
-      "Metered on-chain/off-chain data snapshots, paid per-request via x402 in USDC. " +
-      "No API keys, no signup -- pay the quoted price and get JSON back.",
+      "Real-device, multi-region site verification with screenshot proof, live Pocket Network Shannon " +
+      "relay-demand/tokenomics/validator-security data, and Solana/peaq/BSC on-chain snapshots -- 19 metered " +
+      "x402 routes, priced and settled per call in USDC. Migrating to Acurast decentralized cloud compute for " +
+      "censorship-resistant hosting -- stay tuned.",
     resources,
     resourceCount: resources.length,
     // Coinbase's own Bazaar discovery mirrors this same catalog once each
@@ -291,11 +293,13 @@ function buildOpenApiSpec() {
   return {
     openapi: "3.1.0",
     info: {
-      title: "organiccryptoyyc.com on-chain data API",
+      title: "organiccryptoyyc.com — Multi-Region Verification & On-Chain Data API",
       version: "1.0.0",
       description:
-        "Metered on-chain/off-chain data snapshots, paid per-request via x402 in USDC. " +
-        "No API keys, no signup -- pay the quoted price and get JSON back.",
+        "Real-device, multi-region site verification with screenshot proof, live Pocket Network Shannon " +
+        "relay-demand/tokenomics/validator-security data, and Solana/peaq/BSC on-chain snapshots -- 19 metered " +
+        "x402 routes, priced and settled per call in USDC. Migrating to Acurast decentralized cloud compute for " +
+        "censorship-resistant hosting -- stay tuned.",
       "x-guidance":
         "Every route below is a plain GET request metered with x402 (HTTP 402). Call a route " +
         "unauthenticated first: you'll get a 402 with an `accepts` array listing price/network/payTo " +

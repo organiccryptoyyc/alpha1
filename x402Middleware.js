@@ -713,6 +713,69 @@ export const routes = {
       },
     }),
   },
+  // PATCH (2026-08-08): UpRock Verify -- a different UpRock resource
+  // (Sweep, not Crawl) than /v1/uprock/fetch above. Multi-region real-device
+  // reachability + Core Web Vitals + screenshot proof, built on the same
+  // edge.uprock.com API. See getUprockVerify() in dataSources.js for the
+  // full endpoint/pricing rationale. $0.15/call: ~50% above this catalog's
+  // own closest comparable (/v1/uprock/fetch at $0.10) since a 3-region
+  // sweep with screenshots is a bigger unit of upstream work than one
+  // single-page fetch -- landed on via external comparables too (Checkly/
+  // Datadog-style per-check screenshot/uptime pricing, roughly $0.01-0.04
+  // for a 3-region-equivalent bundle). Revisit once UpRock confirms actual
+  // sweep credit cost against a real payment.
+  "GET /v1/uprock/verify/:domain": {
+    accepts: multiNetworkAccepts(0.15),
+    description:
+      "Multi-region real-device uptime/performance check for a domain (default NA/EU/APAC, via " +
+      "UpRock Verify): per-region reachability, Core Web Vitals (LCP/FCP/CLS/TTFB), total load " +
+      "time, and screenshot-captured proof -- not a synthetic/datacenter check, run from UpRock's " +
+      "real residential/mobile device network.",
+    extensions: declareDiscoveryExtension({
+      pathParams: { domain: "example.com" },
+      pathParamsSchema: {
+        properties: {
+          domain: { type: "string", description: "Bare domain to check, e.g. 'example.com' (no scheme)" },
+        },
+        required: ["domain"],
+      },
+      queryParams: {
+        properties: {
+          regions: {
+            type: "string",
+            description: "Comma-separated regions to check: NA, EU, APAC, LATAM, MEA (default: NA,EU,APAC)",
+          },
+        },
+      },
+      output: {
+        example: {
+          source: "uprock-verify-sweep",
+          domain: "example.com",
+          url: "https://example.com",
+          sweepId: "5cb37d22-bdf7-432c-83a3-6b2d1645ed54",
+          regions: [
+            {
+              region: "NA",
+              status: "completed",
+              country: "US",
+              reachable: true,
+              loadTimeMs: 842,
+              ttfbMs: 120,
+              lcpMs: 610,
+              clsScore: 0.01,
+              hasScreenshot: true,
+              errorType: null,
+              errorMessage: null,
+            },
+          ],
+          completedJobs: 3,
+          failedJobs: 0,
+          totalJobs: 3,
+          timedOut: false,
+        },
+      },
+    }),
+  },
 };
 
 export function buildX402Middleware() {

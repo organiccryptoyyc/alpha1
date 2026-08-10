@@ -776,6 +776,91 @@ export const routes = {
       },
     }),
   },
+  "GET /v1/brand-verify/:domain": {
+    accepts: multiNetworkAccepts(0.23),
+    description:
+      "Composite trust and safety check for a domain: domain-to-IP resolution, multi-region website " +
+      "verification (screenshots plus Core Web Vitals via UpRock Verify), and IP intelligence " +
+      "(geolocation plus proxy/VPN detection) rolled into a single 0-100 trust score and verdict. " +
+      "Built for trust and safety, compliance, brand protection, anti-fraud, and monitoring whether " +
+      "a site is live, performant, and hosted where it claims to be.",
+    extensions: declareDiscoveryExtension({
+      pathParams: { domain: "example.com" },
+      pathParamsSchema: {
+        properties: {
+          domain: { type: "string", description: "Bare domain to check, e.g. 'example.com' (no scheme)" },
+        },
+        required: ["domain"],
+      },
+      queryParams: {
+        properties: {
+          regions: {
+            type: "string",
+            description: "Comma-separated regions to check: NA, EU, APAC, LATAM, MEA (default: NA,EU,APAC)",
+          },
+        },
+      },
+      output: {
+        example: {
+          source: "brand-verify-composite",
+          domain: "example.com",
+          resolvedIp: "93.184.216.34",
+          dnsError: null,
+          trustScore: 92,
+          verdict: "high-trust",
+          scoringReasons: [
+            "3/3 regions reachable (+40)",
+            "avg load 842ms across 3 region(s) (+20)",
+            "resolves to United States, no proxy/VPN detected (+20)",
+            "3 region(s) captured screenshot proof (+20)",
+            ],
+          verification: {
+            source: "uprock-verify-sweep",
+            domain: "example.com",
+            url: "https://example.com",
+            sweepId: "5cb37d22-bdf7-432c-83a3-6b2d1645ad54",
+            regions: [
+              {
+                region: "NA",
+                status: "completed",
+                country: "US",
+                reachable: true,
+                loadTimeMs: 842,
+                ttfbMs: 120,
+                lcpMs: 610,
+                clsScore: 0.01,
+                hasScreenshot: true,
+                errorType: null,
+                errorMessage: null,
+              },
+              ],
+            completedJobs: 3,
+            failedJobs: 0,
+            totalJobs: 3,
+            timedOut: false,
+          },
+          verificationError: null,
+          ipIntelligence: {
+            source: "ip-geolocation",
+            ip: "93.184.216.34",
+            country: "United States",
+            countryCode: "US",
+            region: "Virginia",
+            city: "Ashburn",
+            latitude: 39.0437,
+            longitude: -77.4875,
+            timezone: "America/New_York",
+            isp: "Edgecast Inc.",
+            asn: "AS15133",
+            isProxy: false,
+            fetchedAt: "2026-08-08T00:00:00.000Z",
+          },
+          ipIntelligenceError: null,
+          fetchedAt: "2026-08-08T00:00:00.000Z",
+        },
+      },
+    }),
+  },
 };
 
 export function buildX402Middleware() {

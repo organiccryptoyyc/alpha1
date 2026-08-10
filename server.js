@@ -29,6 +29,7 @@ import {
   getPoktValidatorSecurity,
   getUprockFetch,
   getUprockVerify,
+  getBrandVerify,
   getPeaqGasPrice,
   getPeaqLatestBlock,
   getPeaqBalance,
@@ -545,6 +546,26 @@ app.get("/v1/uprock/verify/:domain", async (req, res, next) => {
         : undefined;
     const cacheKey = `uprock:verify:${domain}:${regions ? regions.join(",") : "default"}`;
     res.json(await cached(cacheKey, 300, () => getUprockVerify(domain, { regions })));
+  } catch (err) {
+    next(err);
+  }
+});
+
+// brand_verify (composite): domain-to-IP resolution + multi-region UpRock Verify
+// (screenshots/Core Web Vitals) + IP intelligence (geo/proxy detection), rolled into
+// a single 0-100 trust score. $0.23/call -- trust & safety, compliance, brand
+// protection, anti-fraud, and "is this site live and hosted where expected" checks.
+// 300s cache, same rationale as /v1/uprock/verify: each call is a real multi-region
+// UpRock sweep plus an IP intelligence lookup, so a cache hit here saves real spend.
+app.get("/v1/brand-verify/:domain", async (req, res, next) => {
+  try {
+    const { domain } = req.params;
+    const regions =
+      typeof req.query.regions === "string"
+    ? req.query.regions.split(",").map((r) => r.trim().toUpperCase()).filter(Boolean)
+      : undefined;
+    const cacheKey = `brand-verify:${domain}:${regions ? regions.join(",") : "default"}`;
+    res.json(await cached(cacheKey, 300, () => getBrandVerify(domain, { regions })));
   } catch (err) {
     next(err);
   }

@@ -973,3 +973,120 @@ export async function getUprockVerify(domain, { regions } = {}) {
     fetchedAt: new Date().toISOString(),
   };
 }
+
+
+// ---------------------------------------------------------------------------
+// brand_verify -- composite trust & safety product ($0.23/call)
+//
+// Bundles three things a trust/safety, compliance, brand-protection, or
+// anti-fraud buyer would otherwise have to stitch together themselves:
+//   1. Domain-to-IP resolution (plain DNS lookup, done inline below)
+//   2. Multi-region website verification with screenshots + Core Web Vitals
+//      (reuses getUprockVerify() above -- same UpRock Sweep under the hood)
+//   3. IP intelligence: geolocation + proxy/VPN detection (reuses
+//      getIpGeolocation() below)
+// and turns them into a single 0-100 trust score + verdict, so the caller
+// gets a judgment call -- "is this site live, performant, and hosted where
+// it claims to be" -- not three raw data dumps to interpret themselves.
+// ---------------------------------------------------------------------------
+function scoreBrandVerify({ verify, geo, dnsError }) {
+    let score = 0;
+    const reasons = [];
+
+  if (verify && verify.totalJobs > 0) {
+        const reachableCount = (verify.regions || []).filter((r) => r.reachable).length;
+        const reachablePts = Math.round((reachableCount / verify.totalJobs) * 40);
+        score += reachablePts;
+        reasons.push(`${reachableCount}/${verify.totalJobs} regions reachable (+${reachablePts})`);
+        if (verify.timedOut) reasons.push("sweep timed out before all regions completed");
+  } else {
+        reasons.push("no reachability data (+0)");
+  }
+
+  const perfSamples = (verify?.regions || []).filter((r) => r.reachable && r.loadTimeMs != null);
+    if (perfSamples.length) {
+          const avgLoadMs = perfSamples.reduce((sum, r) => sum + r.loadTimeMs, 0) / perfSamples.length;
+          let perfPts;
+          if (avgLoadMs <= 1500) perfPts = 20;
+          else if (avgLoadMs <= 3000) perfPts = 14;
+          else if (avgLoadMs <= 5000) perfPts = 8;
+          else perfPts = 2;
+          score += perfPts;
+          reasons.push(`avg load ${Math.round(avgLoadMs)}ms across ${perfSamples.length} region(s) (+${perfPts})`);
+    } else {
+          reasons.push("no performance data (+0)");
+    }
+
+  if (dnsError) {
+        reasons.push("DNS resolution failed (+0)");
+  } else if (geo && !geo.isProxy) {
+        score += 20;
+        reasons.push(`resolves to ${geo.country || "unknown location"}, no proxy/VPN detected (+20)`);
+  } else if (geo && geo.isProxy) {
+        score += 5;
+        reasons.push("IP flagged as proxy/VPN (+5)");
+  } else {
+        reasons.push("no IP intelligence available (+0)");
+  }
+
+  const screenshotCount = (verify?.regions || []).filter((r) => r.hasScreenshot).length;
+    if (screenshotCount > 0) {
+          score += 20;
+          reasons.push(`${screenshotCount} region(s) captured screenshot proof (+20)`);
+    } else {
+          reasons.push("no screenshot proof captured (+0)");
+    }
+
+  score = Math.max(0, Math.min(100, score));
+    let verdict;
+    if (score >= 80) verdict = "high-trust";
+    else if (score >= 55) verdict = "moderate-trust";
+    else if (score >= 30) verdict = "low-trust";
+    else verdict = "untrusted";
+
+  return { score, verdict, reasons };
+}
+
+export async function getBrandVerify(domain, { regions } = {}) {
+    const trimmed = (domain || "").trim().toLowerCase();
+    if (!trimmed) throw new Error("domain is required");
+    if (isBlockedTarget(trimmed)) throw new Error("target host is not allowed");
+
+  const { lookup: dnsLookup } = await import("node:dns/promises");
+
+  let resolvedIp = null;
+    let dnsError = null;
+    try {
+          const result = await dnsLookup(trimmed);
+          resolvedIp = result.address;
+    } catch (err) {
+          dnsError = err.message;
+    }
+
+  const [verifyResult, geoResult] = await Promise.allSettled([
+        getUprockVerify(trimmed, { regions }),
+        resolvedIp ? getIpGeolocation(resolvedIp) : Promise.resolve(null),
+      ]);
+
+  const verify = verifyResult.status === "fulfilled" ? verifyResult.value : null;
+    const verifyError = verifyResult.status === "rejected" ? verifyResult.reason?.message : null;
+    const geo = geoResult.status === "fulfilled" ? geoResult.value : null;
+    const geoError = geoResult.status === "rejected" ? geoResult.reason?.message : null;
+
+  const trust = scoreBrandVerify({ verify, geo, dnsError });
+
+  return {
+        source: "brand-verify-composite",
+        domain: trimmed,
+        resolvedIp,
+        dnsError,
+        trustScore: trust.score,
+        verdict: trust.verdict,
+        scoringReasons: trust.reasons,
+        verification: verify,
+        verificationError: verifyError,
+        ipIntelligence: geo,
+        ipIntelligenceError: geoError,
+        fetchedAt: new Date().toISOString(),
+  };
+}

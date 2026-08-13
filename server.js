@@ -114,6 +114,29 @@ app.get("/health", (req, res) => res.json({ status: "ok" }));
 // container) so the manifest works even if the env var is never set.
 const PUBLIC_BASE_URL = process.env.PUBLIC_BASE_URL || "https://organiccryptoyyc.com:8443";
 
+// Substitutes a route's Bazaar-declared example path-param values into its
+// Express path template (":name" segments) so /.well-known/x402 advertises
+// a real, literally-fetchable "resource" URL instead of the raw route
+// pattern.
+//
+// BUG FIXED (2026-08-12): without this, the manifest advertised e.g.
+// "resource": PUBLIC_BASE_URL + "/v1/price/:symbol" verbatim -- any crawler
+// that takes that URL at face value and GETs it literally hands Express the
+// string ":symbol" as req.params.symbol. That's exactly the
+// "Unsupported symbol: :symbol" / "machine id must be a peaq DID ..."
+// errors seen in production logs, and very likely why x402scan's discovery
+// re-sync was marking several parameterized routes ("skipped") instead of
+// registering them -- it couldn't construct a valid call from a manifest
+// that only ever offered the unsubstituted template.
+function substitutePathParams(path, pathParams) {
+  if (!pathParams) return path;
+  return path.replace(/:([a-zA-Z0-9_]+)/g, (match, name) =>
+    Object.prototype.hasOwnProperty.call(pathParams, name)
+      ? encodeURIComponent(String(pathParams[name]))
+      : match
+  );
+}
+
 // "Everything I sell, one link" — the emerging /.well-known/x402 discovery
 // convention (see e.g. awesome-x402, x402-discovery-mcp): a single
 // unauthenticated, unmetered manifest listing every paid resource on this
@@ -130,9 +153,10 @@ function buildX402Manifest() {
   const resources = Object.entries(routes).map(([routeKey, def]) => {
     const [method, path] = routeKey.split(" ");
     const bazaarInfo = def.extensions?.bazaar?.info;
+    const resourcePath = substitutePathParams(path, bazaarInfo?.input?.pathParams);
     return {
-      resource: PUBLIC_BASE_URL + path,
-        method,
+      resource: PUBLIC_BASE_URL + resourcePath,
+      method,
       type: "http",
       x402Version: 2,
       accepts: def.accepts,
@@ -236,7 +260,17 @@ function inferJsonSchema(value) {
   return { type: "string" };
 }
 
-function schemaPropertiesToParameters(schema, location) {
+// BUG FIXED (2026-08-12): added the optional `examples` param. The schema
+// half of a route's Bazaar declaration (schema.properties.input.properties.
+// pathParams/queryParams) was always being read correctly -- but the
+// generated OpenAPI parameter objects never carried an `example`, so any
+// consumer building a test invocation from /openapi.json alone (no example
+// value to substitute) had nothing better than the literal "{name}" template
+// to fall back on. Real example values already exist at
+// def.extensions.bazaar.info.input.pathParams / .queryParams (declared via
+// declareDiscoveryExtension's own `pathParams`/`input` config) -- this just
+// wires them through.
+function schemaPropertiesToParameters(schema, location, examples) {
   if (!schema?.properties) return [];
   const required = schema.required || [];
   return Object.entries(schema.properties).map(([name, propSchema]) => ({
@@ -245,6 +279,9 @@ function schemaPropertiesToParameters(schema, location) {
     required: required.includes(name),
     schema: { type: propSchema.type || "string" },
     ...(propSchema.description ? { description: propSchema.description } : {}),
+    ...(examples && Object.prototype.hasOwnProperty.call(examples, name)
+      ? { example: examples[name] }
+      : {}),
   }));
 }
 
@@ -254,6 +291,7 @@ function buildOpenApiSpec() {
     const [method, expressPath] = routeKey.split(" ");
     const openApiPath = expressPath.replace(/:([a-zA-Z0-9_]+)/g, "{$1}");
     const bazaarSchema = def.extensions?.bazaar?.schema?.properties?.input?.properties;
+    const bazaarInput = def.extensions?.bazaar?.info?.input;
     const outputExample = def.extensions?.bazaar?.info?.output?.example;
     // The Solana accept entry's price is always the "$0.005"-style string
     // (see multiNetworkAccepts() in x402Middleware.js) -- one canonical USD
@@ -262,8 +300,8 @@ function buildOpenApiSpec() {
     const amount = solAccept ? solAccept.price.replace("$", "") : "0.00";
 
     const parameters = [
-      ...schemaPropertiesToParameters(bazaarSchema?.pathParams, "path"),
-      ...schemaPropertiesToParameters(bazaarSchema?.queryParams, "query"),
+      ...schemaPropertiesToParameters(bazaarSchema?.pathParams, "path", bazaarInput?.pathParams),
+      ...schemaPropertiesToParameters(bazaarSchema?.queryParams, "query", bazaarInput?.queryParams),
     ];
 
     if (!paths[openApiPath]) paths[openApiPath] = {};
@@ -562,8 +600,8 @@ app.get("/v1/brand-verify/:domain", async (req, res, next) => {
     const { domain } = req.params;
     const regions =
       typeof req.query.regions === "string"
-    ? req.query.regions.split(",").map((r) => r.trim().toUpperCase()).filter(Boolean)
-      : undefined;
+        ? req.query.regions.split(",").map((r) => r.trim().toUpperCase()).filter(Boolean)
+        : undefined;
     const cacheKey = `brand-verify:${domain}:${regions ? regions.join(",") : "default"}`;
     res.json(await cached(cacheKey, 300, () => getBrandVerify(domain, { regions })));
   } catch (err) {

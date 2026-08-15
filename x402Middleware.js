@@ -904,7 +904,7 @@ export const routes = {
   },
 
   "GET /v1/x402/seller-trust": {
-    accepts: multiNetworkAccepts(0.235),
+    accepts: multiNetworkAccepts(0.232),
     description:
       "Composite trust score for an x402 SELLER (not a POKT supplier): live Bazaar usage/social proof " +
       "(real settled-payment call and unique-payer counts, free from Coinbase's own discovery index), a " +

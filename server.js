@@ -28,6 +28,7 @@ import {
   getPoktThroughputLeaderboard,
   getPoktValidatorSecurity,
   getPoktSupplierTrust,
+  getX402SellerTrust,
   getUprockFetch,
   getUprockVerify,
   getBrandVerify,
@@ -617,6 +618,24 @@ app.get("/v1/uprock/verify/:domain", async (req, res, next) => {
                 next(err);
         }
   });
+
+// x402_seller_trust (composite): live Bazaar usage/social proof + a live 402
+// reachability probe of the seller's own advertised resources + the
+// seller's own manifest quality + hosting legitimacy (DNS/IP intel),
+// rolled into a single 0-100 trust score for an x402 SELLER (not a POKT
+// supplier -- see /v1/pokt/supplier-trust for that). $0.27/call.
+// 600s cache: Bazaar's own 30-day usage numbers don't need fresher than
+// 10-minute granularity, and this avoids re-probing a stranger's server on
+// every request.
+app.get("/v1/x402/seller-trust", async (req, res, next) => {
+  try {
+    const { url } = req.query;
+    if (!url) return res.status(400).json({ error: "url query param is required" });
+    res.json(await cached(`x402-seller-trust:${url}`, 600, () => getX402SellerTrust(url)));
+  } catch (err) {
+    next(err);
+  }
+});
 
 // brand_verify (composite): domain-to-IP resolution + multi-region UpRock Verify
 // (screenshots/Core Web Vitals) + IP intelligence (geo/proxy detection), rolled into

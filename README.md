@@ -270,6 +270,62 @@ Live-verified working call, for reference:
 node pay-test-debug.mjs "/v1/x402/seller-trust/https%3A%2F%2Forganiccryptoyyc.com%3A8443"
 ```
 
+## puppeteer-render: headless-Chrome screenshots (2026-08-15)
+
+Added `GET /v1/render/screenshot` -- a headless-Chrome screenshot of any
+caller-supplied URL (PNG, returned base64-encoded in JSON). This is the
+first route on this server whose compute is heavier than a lightweight
+JSON/RPC pass-through, so it's built differently from everything else here
+and worth documenting.
+
+**Separate container, not bundled into the main app.** Every other route
+runs a few hundred ms and near-zero RAM inside `onchain-snapshot-api`.
+Launching headless Chrome is 100-300MB RAM and real CPU per call --
+running that inside the main app's process would let a burst of
+screenshot requests starve or crash the JSON routes sharing that event
+loop. `puppeteer-render.js` ships as its own docker-compose service
+(`puppeteer-render`, no ports published, reached only by service name over
+the docker network), the same isolation pattern already used for
+`sol-rpc-cache` and `peaq-facilitator`. `dataSources.js`'s
+`getPuppeteerScreenshot()` does the SSRF hostname check (reusing the exact
+same `isBlockedTarget()` denylist that guards `getUprockFetch`) and then
+calls that internal service over HTTP.
+
+**Alpine + system Chromium, not the bundled `puppeteer` package.**
+`puppeteer`'s own postinstall step downloads a Chromium build with no
+prebuilt Alpine/musl binary. `puppeteer-render.Dockerfile` installs
+Alpine's `chromium` apk package instead and points `puppeteer-core`
+(which never tries to download its own browser) at it via
+`PUPPETEER_EXECUTABLE_PATH`. Expect a noticeably longer first build for
+this one service than the others in this stack.
+
+**One long-lived browser instance, bounded concurrency.** Launching a
+fresh Chrome process per request would dominate render time entirely, so
+`puppeteer-render.js` keeps one browser alive across requests and opens a
+new page per call. A small semaphore (`MAX_CONCURRENT_PAGES = 2`) queues
+requests past that cap instead of letting an unbounded burst OOM the
+container -- queued requests still complete, just serially, bounded by a
+15s per-page navigation timeout.
+
+**Pricing ($0.03/call):** unlike the UpRock-backed routes, there's no
+per-call upstream credit cost here -- the compute is entirely
+infrastructure this project already runs -- but a real Chrome render is
+meaningfully heavier than the sub-cent RPC pass-through routes, so it sits
+mid-tier rather than at the bottom. Revisit once real render volume shows
+actual infra cost.
+
+**Discovery-extension content kept deliberately minimal** (short
+description, no embedded `screenshotBase64` in the example) -- directly
+applying the lesson from the seller-trust root-cause writeup above: a
+large/deeply nested Bazaar discovery-extension declaration was the
+confirmed cause of that route's live-payment failures, independent of
+price or URL structure. No reason to risk repeating it here.
+
+**Status as of this write-up:** built, pushed, and syntax-checked; NOT yet
+live-tested against a real payment (same status every new route on this
+server carries before its first real test -- see `pay-test-debug.mjs` in
+the project notes for how prior routes were verified).
+
 ## Routes and pricing
 
 | Route | Price | What it returns |

@@ -916,19 +916,17 @@ export const routes = {
       "facilitator -- a seller on a different/self-hosted facilitator may show zero Bazaar usage despite " +
       "being legitimately paid elsewhere.",
     extensions: declareDiscoveryExtension({
-      pathParams: { encodedUrl: "https%3A%2F%2Fexample.com%3A8443" },
+      pathParams: { encodedUrl: "example.com" },
       pathParamsSchema: {
         properties: {
           encodedUrl: {
             type: "string",
             description:
-              "Seller's base URL (scheme + host + port if non-standard), percent-encoded as a single path " +
-              "segment via encodeURIComponent, e.g. encodeURIComponent('https://example.com:8443') -> " +
-              "'https%3A%2F%2Fexample.com%3A8443'. A raw, un-encoded query-string form of this route " +
-              "(?url=...) previously failed 100% of live payments -- CDP's facilitator rejects any resource " +
-              "URL containing a query string, confirmed by bisecting price to an exact match with a working " +
-              "route and by testing with the query value itself percent-encoded (both still failed). This " +
-              "path-param form has no query string.",
+              "Seller's base URL (scheme plus host plus port if non standard), encoded as a single path " +
+              "segment using JavaScript's encodeURIComponent function before being placed in the URL. For " +
+              "instance, encoding the string https colon slash slash example dot com colon 8443 produces " +
+              "the value to use here. A raw, un-encoded query-string form of this route (with a url query " +
+              "param) previously failed on every live payment; this path-segment form is the fix.",
           },
         },
         required: ["encodedUrl"],

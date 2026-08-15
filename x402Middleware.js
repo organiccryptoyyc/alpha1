@@ -917,6 +917,39 @@ export const routes = {
       },
     }),
   },
+  // Headless-Chrome screenshot render (Puppeteer, via the puppeteer-render
+  // service -- see dataSources.js/puppeteer-render.js for the full
+  // architecture). $0.03/call: unlike the UpRock-backed routes above, there
+  // is no per-call upstream credit cost here -- the compute is entirely
+  // infrastructure this project already runs -- but a headless-Chrome
+  // render is meaningfully heavier (real CPU + ~100-300MB RAM per call)
+  // than the sub-cent RPC pass-through routes at the top of this file, so
+  // it sits mid-tier rather than at the bottom. Revisit once real render
+  // volume shows actual infra cost.
+  //
+  // Discovery-extension content deliberately kept minimal (short
+  // description, no embedded example beyond a few scalar fields) -- see the
+  // seller-trust payment failures writeup in README.md (2026-08-15) for
+  // why: a large/deeply nested Bazaar discovery-extension declaration was
+  // the confirmed root cause of that route's live-payment failures,
+  // independent of price or URL structure. screenshotBase64 is deliberately
+  // left out of the example below for the same reason.
+  "GET /v1/render/screenshot": {
+    accepts: multiNetworkAccepts(0.03),
+    description: "Headless-Chrome screenshot of a URL (PNG, base64-encoded).",
+    extensions: declareDiscoveryExtension({
+      input: { url: "https://example.com" },
+      inputSchema: {
+        properties: {
+          url: { type: "string", description: "Absolute URL to screenshot (http or https)" },
+        },
+        required: ["url"],
+      },
+      output: {
+        example: { source: "puppeteer-screenshot", statusCode: 200, width: 1280, height: 800 },
+      },
+    }),
+  },
 };
 
 export function buildX402Middleware() {

@@ -1090,3 +1090,159 @@ export async function getBrandVerify(domain, { regions } = {}) {
         fetchedAt: new Date().toISOString(),
   };
 }
+
+
+// ---------------------------------------------------------------------------
+// pokt-supplier-trust -- composite trust score for a POKT Shannon supplier
+// ($0.05/call)
+//
+// Mirrors brand_verify's pattern (on-chain data + a live reachability probe,
+// rolled into one 0-100 score) but applied to POKT Network suppliers instead
+// of arbitrary domains. Useful to Application/gateway operators deciding
+// which suppliers to route relays to: is this operator actually staked, in
+// good standing, and serving traffic on the RPC endpoints it advertises --
+// a judgment neither the raw on-chain stake data nor a bare uptime check
+// answers alone.
+//
+// Schema confirmed live 2026-08-10 (not documented anywhere): Pocketdex's
+// singular `supplier` query takes an `id` argument, and `id` is exactly the
+// same bech32 string as `operatorId` (verified: fetching both for the same
+// row returns identical values). `serviceConfigs.nodes[].endpoints` is a
+// JSON scalar (an array of {url, configs, rpcType} objects, not a GraphQL
+// object type) -- querying it with a sub-selection throws
+// "must not have a selection since type JSON! has no subfields", confirmed
+// live before writing this, not assumed from the schema shape alone.
+const SUPPLIER_TRUST_QUERY = `
+  query SupplierTrust($operatorId: String!) {
+      supplier(id: $operatorId) {
+            operatorId
+                  stakeAmount
+                        stakeStatus
+                              unstakingReason
+                                    serviceConfigs {
+                                            nodes {
+                                                      serviceId
+                                                                endpoints
+                                                                        }
+                                                                              }
+                                                                                  }
+                                                                                    }
+                                                                                    `;
+
+// Bounded on purpose, same discipline as every other buyer-triggered probe
+// in this file (see getUprockFetch/getUprockVerify's SSRF notes above): a
+// supplier can advertise many endpoints across many services, and this is
+// one x402-paid call, not an unbounded crawl. Reuses isBlockedTarget() so a
+// malicious/misconfigured advertised endpoint can't be used to probe this
+// container's internal network.
+const SUPPLIER_TRUST_PROBE_TIMEOUT_MS = 4000;
+const SUPPLIER_TRUST_PROBE_MAX = 5;
+
+async function probePoktSupplierEndpoint(url) {
+    let parsed;
+    try {
+          parsed = new URL(url);
+    } catch {
+          return { url, reachable: false, error: "invalid URL" };
+    }
+    if (!["http:", "https:"].includes(parsed.protocol) || isBlockedTarget(parsed.hostname)) {
+          return { url, reachable: false, error: "blocked target" };
+    }
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), SUPPLIER_TRUST_PROBE_TIMEOUT_MS);
+    const start = Date.now();
+    try {
+          const res = await fetch(parsed.toString(), { method: "GET", signal: controller.signal });
+          return { url, reachable: true, statusCode: res.status, responseTimeMs: Date.now() - start };
+    } catch (err) {
+          return { url, reachable: false, error: err.name === "AbortError" ? "timeout" : err.message };
+    } finally {
+          clearTimeout(timeout);
+    }
+}
+
+function scorePoktSupplierTrust({ supplier, endpointResults, serviceCount }) {
+    if (!supplier) {
+          return {
+                  score: 0,
+                  verdict: "not-found",
+                  reasons: ["operator not found in Pocketdex -- not a registered/staked supplier"],
+          };
+    }
+
+  let score = 0;
+    const reasons = [];
+
+  if (supplier.stakeStatus === "Staked") {
+        score += 40;
+        reasons.push("supplier is actively staked (+40)");
+  } else if (supplier.stakeStatus === "Unstaking") {
+        score += 15;
+        reasons.push(`supplier is unstaking (${supplier.unstakingReason || "reason unknown"}) (+15)`);
+  } else {
+        reasons.push(`supplier stake status is ${supplier.stakeStatus || "unknown"} (+0)`);
+  }
+
+  if (endpointResults.length > 0) {
+        const reachableCount = endpointResults.filter((e) => e.reachable).length;
+        const pts = Math.round((reachableCount / endpointResults.length) * 40);
+        score += pts;
+        reasons.push(`${reachableCount}/${endpointResults.length} advertised endpoints reachable (+${pts})`);
+  } else {
+        reasons.push("no advertised endpoints to probe (+0)");
+  }
+
+  if (serviceCount >= 3) {
+        score += 20;
+        reasons.push(`staked for ${serviceCount} distinct services (+20)`);
+  } else if (serviceCount >= 1) {
+        score += 10;
+        reasons.push(`staked for ${serviceCount} service(s) (+10)`);
+  } else {
+        reasons.push("no services configured (+0)");
+  }
+
+  score = Math.max(0, Math.min(100, score));
+    let verdict;
+    if (score >= 80) verdict = "high-trust";
+    else if (score >= 55) verdict = "moderate-trust";
+    else if (score >= 30) verdict = "low-trust";
+    else verdict = "untrusted";
+
+  return { score, verdict, reasons };
+}
+
+export async function getPoktSupplierTrust(operatorId) {
+    const trimmed = String(operatorId || "").trim();
+    if (!trimmed) throw new Error("operatorId is required");
+
+  const data = await poktGraphQL(SUPPLIER_TRUST_QUERY, { operatorId: trimmed });
+    const supplier = data?.supplier ?? null;
+
+  const serviceNodes = supplier?.serviceConfigs?.nodes ?? [];
+    const serviceCount = serviceNodes.length;
+
+  const allEndpointUrls = serviceNodes.flatMap((s) =>
+        (Array.isArray(s.endpoints) ? s.endpoints : []).map((e) => e?.url).filter(Boolean)
+                                                 );
+    const probeUrls = allEndpointUrls.slice(0, SUPPLIER_TRUST_PROBE_MAX);
+    const endpointResults = await Promise.all(probeUrls.map((url) => probePoktSupplierEndpoint(url)));
+
+  const trust = scorePoktSupplierTrust({ supplier, endpointResults, serviceCount });
+
+  return {
+        source: "pokt-supplier-trust",
+        operatorId: trimmed,
+        found: Boolean(supplier),
+        stakeStatus: supplier?.stakeStatus ?? null,
+        stakedPokt: supplier ? Number(BigInt(supplier.stakeAmount ?? "0")) / 1e6 : null,
+        unstakingReason: supplier?.unstakingReason ?? null,
+        services: serviceNodes.map((s) => s.serviceId),
+        endpointsProbed: endpointResults,
+        endpointsTotalAdvertised: allEndpointUrls.length,
+        trustScore: trust.score,
+        verdict: trust.verdict,
+        scoringReasons: trust.reasons,
+        fetchedAt: new Date().toISOString(),
+  };
+}

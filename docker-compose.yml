@@ -93,8 +93,19 @@ services:
       # -- that's fail-closed by design, not a bug, see allowlist.js.
       ALLOWLIST_MODE: ${ALLOWLIST_MODE}
       ALLOWLIST_KEYS: ${ALLOWLIST_KEYS}
+      # PATCH (2026-08-15): headless-Chrome render service backing
+      # GET /v1/render/screenshot -- see puppeteer-render.js for the full
+      # "why a separate container" rationale. Internal-only, reached by
+      # service name over the docker network; not published to the host or
+      # the internet. Optional in the same graceful-default sense as
+      # PEAQ_FACILITATOR_URL above -- x402Middleware.js/dataSources.js
+      # default it to http://puppeteer-render:3002 (the service below) in
+      # code, so this only needs setting in Portainer if you point it
+      # somewhere else.
+      PUPPETEER_RENDER_URL: ${PUPPETEER_RENDER_URL}
     depends_on:
       - sol-rpc-cache
+      - puppeteer-render
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://localhost:4021/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
       interval: 30s
@@ -145,6 +156,29 @@ services:
       # no separate variable needed for this service.
       PEAQ_RPC_URL: ${PEAQ_RPC_URL}
       PORT: "3333"
+
+  puppeteer-render:
+    # Internal-only headless-Chrome rendering service backing
+    # GET /v1/render/screenshot -- see puppeteer-render.js for the full
+    # "why a separate container" rationale (Chrome's resource footprint is a
+    # different order of magnitude than every other route's lightweight
+    # JSON pass-through, so it's isolated here rather than bundled into the
+    # main app image/process). No ports published to the host; reachable
+    # from onchain-snapshot-api only by its service name over the docker
+    # network, same isolation pattern as sol-rpc-cache and peaq-facilitator
+    # above. Builds its own Alpine + system-chromium image (see
+    # puppeteer-render.Dockerfile) -- expect a noticeably longer first build
+    # than this repo's other services, since apk installing chromium plus
+    # npm installing puppeteer-core is more work than either sol-rpc-cache
+    # (zero deps) or peaq-facilitator (three small deps).
+    build:
+      context: .
+      dockerfile: puppeteer-render.Dockerfile
+    image: umbrel-onchain-snapshot-puppeteer-render:latest
+    container_name: onchain-snapshot-puppeteer-render
+    restart: unless-stopped
+    environment:
+      PORT: "3002"
 
   caddy:
     # Terminates TLS and reverse-proxies to onchain-snapshot-api over the

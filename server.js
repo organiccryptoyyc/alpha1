@@ -40,6 +40,7 @@ import {
   getBscLatestBlock,
   getBscBalance,
   getIpGeolocation,
+  getPuppeteerScreenshot,
 } from "./dataSources.js";
 
 const app = express();
@@ -668,6 +669,23 @@ app.get("/v1/brand-verify/:domain", async (req, res, next) => {
         : undefined;
     const cacheKey = `brand-verify:${domain}:${regions ? regions.join(",") : "default"}`;
     res.json(await cached(cacheKey, 300, () => getBrandVerify(domain, { regions })));
+  } catch (err) {
+    next(err);
+  }
+});
+
+// Headless-Chrome screenshot render (Puppeteer, via the puppeteer-render
+// service -- see dataSources.js/puppeteer-render.js for the architecture).
+// $0.03/call. 30s cache -- much shorter than this file's other caches
+// (which mostly guard real upstream credit spend): a rendered page's visual
+// state can change quickly, and there's no per-call credit cost here to
+// protect, just repeat compute -- 30s still absorbs a tight burst of
+// requests for the same URL without serving a stale screenshot for long.
+app.get("/v1/render/screenshot", async (req, res, next) => {
+  try {
+    const { url } = req.query;
+    if (!url) return res.status(400).json({ error: "url query param is required" });
+    res.json(await cached(`render:screenshot:${url}`, 30, () => getPuppeteerScreenshot(url)));
   } catch (err) {
     next(err);
   }

@@ -27,6 +27,7 @@ import {
   getPoktTokenomics,
   getPoktThroughputLeaderboard,
   getPoktValidatorSecurity,
+  getPoktSupplierTrust,
   getUprockFetch,
   getUprockVerify,
   getBrandVerify,
@@ -600,6 +601,22 @@ app.get("/v1/uprock/verify/:domain", async (req, res, next) => {
     next(err);
   }
 });
+
+  // pokt_supplier_trust (composite): live on-chain stake status (Pocketdex) + a
+  // bounded, SSRF-hardened reachability probe of the supplier's own advertised
+  // RPC endpoints. $0.05/call -- for gateways, indexers, and node monitoring
+  // tools deciding whether to route relays to a given supplier.
+  // 300s cache: stake status and endpoint reachability don't need to be fresher
+  // than a few minutes for most callers, and this avoids re-probing live IPs
+  // on every request.
+  app.get("/v1/pokt/supplier-trust/:operatorId", async (req, res, next) => {
+        try {
+                const { operatorId } = req.params;
+                res.json(await cached(`pokt:supplier-trust:${operatorId}`, 300, () => getPoktSupplierTrust(operatorId)));
+        } catch (err) {
+                next(err);
+        }
+  });
 
 // brand_verify (composite): domain-to-IP resolution + multi-region UpRock Verify
 // (screenshots/Core Web Vitals) + IP intelligence (geo/proxy detection), rolled into

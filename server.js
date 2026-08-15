@@ -627,10 +627,26 @@ app.get("/v1/uprock/verify/:domain", async (req, res, next) => {
 // 600s cache: Bazaar's own 30-day usage numbers don't need fresher than
 // 10-minute granularity, and this avoids re-probing a stranger's server on
 // every request.
-app.get("/v1/x402/seller-trust", async (req, res, next) => {
+app.get("/v1/x402/seller-trust/:encodedUrl", async (req, res, next) => {
   try {
-    const { url } = req.query;
-    if (!url) return res.status(400).json({ error: "url query param is required" });
+    // NOTE (2026-08-15): switched from a `?url=` query param to a URL-encoded
+    // path segment after live-testing conclusively showed CDP's facilitator
+    // rejects ANY payment whose resource URL contains a query string --
+    // confirmed by bisecting price down to an exact match with the
+    // known-working /v1/brand-verify route (same $0.23, same atomic amount)
+    // and by re-testing with the query value itself properly percent-encoded
+    // -- both still failed identically ('paymentPayload' is invalid: must
+    // match one of [x402V2Pay...). Removing the query string entirely (this
+    // route is the only paid route on this server that REQUIRED one) is the
+    // next thing to isolate. Caller must encodeURIComponent() the full
+    // seller base URL as the path segment.
+    let url;
+    try {
+      url = decodeURIComponent(req.params.encodedUrl);
+    } catch {
+      return res.status(400).json({ error: "encodedUrl path segment must be percent-encoded" });
+    }
+    if (!url) return res.status(400).json({ error: "encodedUrl path segment is required" });
     res.json(await cached(`x402-seller-trust:${url}`, 600, () => getX402SellerTrust(url)));
   } catch (err) {
     next(err);

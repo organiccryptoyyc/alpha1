@@ -1246,3 +1246,314 @@ export async function getPoktSupplierTrust(operatorId) {
         fetchedAt: new Date().toISOString(),
   };
 }
+
+// ---------------------------------------------------------------------------
+// x402_seller_trust -- composite trust score for an x402 SELLER (not POKT).
+// Given a seller's base URL (e.g. "https://example.com:8443"), scores
+// whether this looks like a real, actually-used, currently-live x402
+// marketplace listing -- not a POKT supplier, and not a bare-domain brand
+// check (this needs the full base URL since sellers commonly run on
+// non-standard ports, same as this project's own :8443).
+//
+// Design doc: X402-SELLER-TRUST-ARCHITECTURE.md. Four pillars:
+//   1. Bazaar usage/social proof (real settled-payment call/payer counts,
+//      free and keyless from Coinbase's own discovery index) -- 35 pts
+//   2. Live reachability / 402 conformance probe of the seller's own
+//      advertised resources -- 25 pts
+//   3. Seller's own /.well-known/x402 manifest quality/completeness -- 15 pts
+//   4. Hosting legitimacy (DNS + IP intelligence, reuses brand_verify's
+//      exact logic) -- 15 pts
+// plus listing freshness -- 10 pts.
+//
+// Known limitation, disclosed in the response itself, not just here: Bazaar
+// quality data only covers payments settled through Coinbase's CDP
+// facilitator. A seller using a different/self-hosted facilitator (this
+// project's own peaq route is a real example) will show zero Bazaar usage
+// despite being legitimately paid elsewhere -- this route can't see that.
+// ---------------------------------------------------------------------------
+
+const BAZAAR_SEARCH_URL = "https://api.cdp.coinbase.com/platform/v2/x402/discovery/search";
+const BAZAAR_LOOKUP_TIMEOUT_MS = 6000;
+
+async function queryBazaarDiscovery(hostname) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), BAZAAR_LOOKUP_TIMEOUT_MS);
+  try {
+    const url = `${BAZAAR_SEARCH_URL}?query=${encodeURIComponent(hostname)}`;
+    const res = await fetch(url, { signal: controller.signal });
+    if (!res.ok) {
+      return { matched: false, error: `Bazaar search returned ${res.status}`, routes: [] };
+    }
+    const body = await res.json();
+    const all = Array.isArray(body?.resources) ? body.resources : [];
+    // /search is fuzzy/hybrid (matches descriptions too), so filter
+    // client-side to only resources whose own hostname exactly matches the
+    // target -- an unfiltered result set will include false positives.
+    const matched = all.filter((r) => {
+      try {
+        return new URL(r.resource).hostname.toLowerCase() === hostname.toLowerCase();
+      } catch {
+        return false;
+      }
+    });
+    return { matched: matched.length > 0, error: null, routes: matched };
+  } catch (err) {
+    return { matched: false, error: err.name === "AbortError" ? "timeout" : err.message, routes: [] };
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+const MANIFEST_FETCH_TIMEOUT_MS = 5000;
+
+async function fetchManifestAt(url) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), MANIFEST_FETCH_TIMEOUT_MS);
+  try {
+    const res = await fetch(url, { signal: controller.signal });
+    if (!res.ok) return null;
+    return await res.json();
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+async function fetchSellerManifest(baseUrl) {
+  const trimmedBase = baseUrl.replace(/\/$/, "");
+  const manifest =
+    (await fetchManifestAt(`${trimmedBase}/.well-known/x402`)) ??
+    (await fetchManifestAt(`${trimmedBase}/.well-known/x402.json`));
+  if (!manifest) {
+    return { found: false, resources: [], resourceCount: 0, wellFormedCount: 0, hasX402Version: false };
+  }
+  const resources = Array.isArray(manifest.resources) ? manifest.resources : [];
+  const wellFormedCount = resources.filter((r) => {
+    const accepts = Array.isArray(r.accepts) ? r.accepts : [];
+    return accepts.length > 0 && accepts.every((a) => a.network && a.payTo && a.price);
+  }).length;
+  return {
+    found: true,
+    hasX402Version: Boolean(manifest.x402Version),
+    resourceCount: resources.length,
+    wellFormedCount,
+    resources,
+  };
+}
+
+// Bounded on purpose, same discipline as every other buyer-triggered probe
+// in this file -- a seller can advertise many resources and this is one
+// x402-paid call, not an unbounded crawl. Reuses isBlockedTarget() so a
+// malicious/misconfigured advertised resource can't be used to probe this
+// container's internal network.
+const SELLER_TRUST_PROBE_TIMEOUT_MS = 4000;
+const SELLER_TRUST_PROBE_MAX = 3;
+
+async function probeSellerResource(url) {
+  let parsed;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return { url, checkedOk: false, error: "invalid URL" };
+  }
+  if (!["http:", "https:"].includes(parsed.protocol) || isBlockedTarget(parsed.hostname)) {
+    return { url, checkedOk: false, error: "blocked target" };
+  }
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), SELLER_TRUST_PROBE_TIMEOUT_MS);
+  const start = Date.now();
+  try {
+    const res = await fetch(parsed.toString(), { method: "GET", signal: controller.signal });
+    const responseTimeMs = Date.now() - start;
+    let hasAcceptsArray = false;
+    if (res.status === 402) {
+      try {
+        const body = await res.json();
+        hasAcceptsArray = Array.isArray(body?.accepts) && body.accepts.length > 0;
+      } catch {
+        hasAcceptsArray = false;
+      }
+    }
+    return {
+      url,
+      checkedOk: true,
+      statusCode: res.status,
+      is402: res.status === 402,
+      hasAcceptsArray,
+      responseTimeMs,
+    };
+  } catch (err) {
+    return { url, checkedOk: false, error: err.name === "AbortError" ? "timeout" : err.message };
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+function scoreX402SellerTrust({ bazaar, manifest, probeResults, dnsError, geo }) {
+  if (!bazaar.matched && !manifest.found) {
+    return {
+      score: 0,
+      verdict: "not-found",
+      reasons: ["not listed on Bazaar and no live x402 manifest found at this URL"],
+    };
+  }
+
+  let score = 0;
+  const reasons = [];
+
+  if (bazaar.matched) {
+    const totalCalls = bazaar.routes.reduce((sum, r) => sum + (r.quality?.l30DaysTotalCalls || 0), 0);
+    const uniquePayers = Math.max(0, ...bazaar.routes.map((r) => r.quality?.l30DaysUniquePayers || 0));
+    let usagePts;
+    if (totalCalls >= 1000 && uniquePayers >= 10) usagePts = 35;
+    else if (totalCalls >= 100 && uniquePayers >= 3) usagePts = 25;
+    else if (totalCalls >= 10) usagePts = 15;
+    else if (totalCalls > 0) usagePts = 8;
+    else usagePts = 3;
+    score += usagePts;
+    reasons.push(
+      `${bazaar.routes.length} route(s) on Bazaar, ${totalCalls} calls / ${uniquePayers} unique payers in 30d (+${usagePts})`
+    );
+  } else {
+    reasons.push(bazaar.error ? `Bazaar lookup failed: ${bazaar.error} (+0)` : "not listed on Bazaar (+0)");
+  }
+
+  if (probeResults.length > 0) {
+    const conformant = probeResults.filter((p) => p.checkedOk && p.is402 && p.hasAcceptsArray).length;
+    const pts = Math.round((conformant / probeResults.length) * 25);
+    score += pts;
+    reasons.push(`${conformant}/${probeResults.length} probed resource(s) returned a live 402 paywall (+${pts})`);
+  } else {
+    reasons.push("no resources available to probe (+0)");
+  }
+
+  if (manifest.found) {
+    let manifestPts = 5;
+    if (manifest.hasX402Version) manifestPts += 3;
+    if (manifest.resourceCount > 0) {
+      const completeness = manifest.wellFormedCount / manifest.resourceCount;
+      manifestPts += Math.round(completeness * 7);
+    }
+    manifestPts = Math.min(15, manifestPts);
+    score += manifestPts;
+    reasons.push(
+      `manifest live with ${manifest.resourceCount} listed resource(s), ${manifest.wellFormedCount} well-formed (+${manifestPts})`
+    );
+  } else {
+    reasons.push("no /.well-known/x402 manifest reachable (+0)");
+  }
+
+  if (dnsError) {
+    reasons.push("DNS resolution failed (+0)");
+  } else if (geo && !geo.isProxy) {
+    score += 15;
+    reasons.push(`resolves to ${geo.country || "unknown location"}, no proxy/VPN detected (+15)`);
+  } else if (geo && geo.isProxy) {
+    score += 4;
+    reasons.push("IP flagged as proxy/VPN (+4)");
+  } else {
+    reasons.push("no IP intelligence available (+0)");
+  }
+
+  const lastCalledDates = bazaar.routes
+    .map((r) => r.quality?.lastCalledAt)
+    .filter(Boolean)
+    .map((d) => new Date(d).getTime());
+  if (lastCalledDates.length > 0) {
+    const mostRecent = Math.max(...lastCalledDates);
+    const daysSince = (Date.now() - mostRecent) / (1000 * 60 * 60 * 24);
+    let freshPts;
+    if (daysSince <= 7) freshPts = 10;
+    else if (daysSince <= 30) freshPts = 6;
+    else if (daysSince <= 90) freshPts = 2;
+    else freshPts = 0;
+    score += freshPts;
+    reasons.push(`last paid call ${Math.round(daysSince)} day(s) ago (+${freshPts})`);
+  } else {
+    reasons.push("no call history to judge freshness (+0)");
+  }
+
+  score = Math.max(0, Math.min(100, score));
+  let verdict;
+  if (score >= 80) verdict = "high-trust";
+  else if (score >= 55) verdict = "moderate-trust";
+  else if (score >= 30) verdict = "low-trust";
+  else verdict = "untrusted";
+
+  return { score, verdict, reasons };
+}
+
+export async function getX402SellerTrust(baseUrl) {
+  const trimmed = String(baseUrl || "").trim();
+  if (!trimmed) throw new Error("baseUrl is required");
+  let parsed;
+  try {
+    parsed = new URL(trimmed);
+  } catch {
+    throw new Error("baseUrl must be a valid absolute URL, e.g. https://example.com:8443");
+  }
+  if (!["http:", "https:"].includes(parsed.protocol)) {
+    throw new Error("baseUrl must use http or https");
+  }
+  if (isBlockedTarget(parsed.hostname)) {
+    throw new Error("baseUrl must not target a localhost, private, or link-local address");
+  }
+  const hostname = parsed.hostname;
+  const trimmedBase = trimmed.replace(/\/$/, "");
+
+  const { lookup: dnsLookup } = await import("node:dns/promises");
+  let resolvedIp = null;
+  let dnsError = null;
+  try {
+    const result = await dnsLookup(hostname);
+    resolvedIp = result.address;
+  } catch (err) {
+    dnsError = err.message;
+  }
+
+  const [bazaarResult, manifestResult, geoResult] = await Promise.allSettled([
+    queryBazaarDiscovery(hostname),
+    fetchSellerManifest(trimmedBase),
+    resolvedIp ? getIpGeolocation(resolvedIp) : Promise.resolve(null),
+  ]);
+
+  const bazaar =
+    bazaarResult.status === "fulfilled"
+      ? bazaarResult.value
+      : { matched: false, error: bazaarResult.reason?.message, routes: [] };
+  const manifest =
+    manifestResult.status === "fulfilled"
+      ? manifestResult.value
+      : { found: false, resources: [], resourceCount: 0, wellFormedCount: 0, hasX402Version: false };
+  const geo = geoResult.status === "fulfilled" ? geoResult.value : null;
+  const geoError = geoResult.status === "rejected" ? geoResult.reason?.message : null;
+
+  const bazaarUrls = bazaar.routes.map((r) => r.resource).filter(Boolean);
+  const manifestUrls = (manifest.resources || []).map((r) => r.resource).filter(Boolean);
+  const candidateUrls = [...new Set([...bazaarUrls, ...manifestUrls])].slice(0, SELLER_TRUST_PROBE_MAX);
+  const probeResults = await Promise.all(candidateUrls.map((url) => probeSellerResource(url)));
+
+  const trust = scoreX402SellerTrust({ bazaar, manifest, probeResults, dnsError, geo });
+
+  return {
+    source: "x402-seller-trust-composite",
+    baseUrl: trimmedBase,
+    hostname,
+    resolvedIp,
+    dnsError,
+    bazaarListed: bazaar.matched,
+    bazaarRouteCount: bazaar.routes.length,
+    bazaarTotal30dCalls: bazaar.routes.reduce((sum, r) => sum + (r.quality?.l30DaysTotalCalls || 0), 0),
+    bazaarLookupError: bazaar.error,
+    manifestReachable: manifest.found,
+    manifestResourceCount: manifest.resourceCount || 0,
+    resourcesProbed: probeResults,
+    ipIntelligence: geo,
+    ipIntelligenceError: geoError,
+    trustScore: trust.score,
+    verdict: trust.verdict,
+    scoringReasons: trust.reasons,
+    fetchedAt: new Date().toISOString(),
+  };
+}

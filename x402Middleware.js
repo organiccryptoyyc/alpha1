@@ -905,75 +905,15 @@ export const routes = {
 
   "GET /v1/x402/seller-trust/:encodedUrl": {
     accepts: multiNetworkAccepts(0.23),
-    description:
-      "Composite trust score for an x402 SELLER (not a POKT supplier): live Bazaar usage/social proof " +
-      "(real settled-payment call and unique-payer counts, free from Coinbase's own discovery index), a " +
-      "live reachability probe confirming the seller's advertised resources return a real 402 paywall right " +
-      "now, the seller's own /.well-known/x402 manifest quality, and hosting legitimacy (DNS plus IP " +
-      "intelligence) -- rolled into a single 0-100 trust score. Built for agents and marketplaces deciding " +
-      "whether an unfamiliar x402 seller is real, actually used, and live right now, or a listed-but-dead " +
-      "or freshly-spun-up facade. Note: Bazaar usage only covers payments settled through Coinbase's CDP " +
-      "facilitator -- a seller on a different/self-hosted facilitator may show zero Bazaar usage despite " +
-      "being legitimately paid elsewhere.",
+    description: "Trust score for an x402 seller.",
     extensions: declareDiscoveryExtension({
       pathParams: { encodedUrl: "example.com" },
       pathParamsSchema: {
-        properties: {
-          encodedUrl: {
-            type: "string",
-            description:
-              "Seller's base URL (scheme plus host plus port if non standard), encoded as a single path " +
-              "segment using JavaScript's encodeURIComponent function before being placed in the URL. For " +
-              "instance, encoding the string https colon slash slash example dot com colon 8443 produces " +
-              "the value to use here. A raw, un-encoded query-string form of this route (with a url query " +
-              "param) previously failed on every live payment; this path-segment form is the fix.",
-          },
-        },
+        properties: { encodedUrl: { type: "string", description: "Encoded seller URL" } },
         required: ["encodedUrl"],
       },
       output: {
-        example: {
-          source: "x402-seller-trust-composite",
-          baseUrl: "https://example.com:8443",
-          hostname: "example.com",
-          resolvedIp: "93.184.216.34",
-          dnsError: null,
-          bazaarListed: true,
-          bazaarRouteCount: 3,
-          bazaarTotal30dCalls: 214,
-          bazaarLookupError: null,
-          manifestReachable: true,
-          manifestResourceCount: 22,
-          resourcesProbed: [
-            { url: "https://example.com:8443/v1/eth/gas-price", checkedOk: true, statusCode: 402, is402: true, hasAcceptsArray: true, responseTimeMs: 180 },
-            ],
-          ipIntelligence: {
-            source: "ip-geolocation",
-            ip: "93.184.216.34",
-            country: "United States",
-            countryCode: "US",
-            region: "Virginia",
-            city: "Ashburn",
-            latitude: 39.0437,
-            longitude: -77.4875,
-            timezone: "America/New_York",
-            isp: "Edgecast Inc.",
-            asn: "AS15133",
-            isProxy: false,
-            fetchedAt: "2026-08-15T00:00:00.000Z",
-          },
-          ipIntelligenceError: null,
-          trustScore: 88,
-          verdict: "high-trust",
-          scoringReasons: [
-            "3 route(s) on Bazaar, 214 calls / 12 unique payers in 30d (+25)",
-            "1/1 probed resource(s) returned a live 402 paywall (+25)",
-            "manifest live with 22 listed resource(s), 22 well-formed (+15)",
-            "resolves to United States, no proxy/VPN detected (+15)",
-            "last paid call 2 day(s) ago (+10)",
-            ],
-          fetchedAt: "2026-08-15T00:00:00.000Z",
-        },
+        example: { source: "x402-seller-trust-composite", trustScore: 88, verdict: "high-trust" },
       },
     }),
   },

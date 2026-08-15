@@ -204,6 +204,72 @@ both of the above first — a new parameterized route needs a
 `declareDiscoveryExtension()` call (see `x402Middleware.js`), and a bigger
 route catalog may need the rate limit raised again.
 
+## seller-trust payment failures -- root cause and fix (2026-08-15)
+
+`/v1/x402/seller-trust` (the composite trust-score route for x402 sellers,
+not to be confused with `/v1/pokt/supplier-trust`) failed on every live
+payment attempt from the day it was built until this date -- always the
+same generic CDP facilitator error, `'paymentPayload' is invalid: must
+match one of [x402V2Pay...`. Chasing the real cause took a long elimination
+sequence across two sessions; recorded here so nobody repeats it.
+
+**Hypotheses tested and ruled out, in order, each with a live payment
+retest:**
+
+1. **Price ceiling.** Bisected the price down from $0.27 to $0.232 in five
+steps -- all failed identically. Then matched the price exactly to
+`/v1/brand-verify` ($0.23, same atomic amount) -- still failed, which
+disproved price as a factor outright (brand-verify itself works fine at
+that price).
+2. **Query string in the resource URL.** Restructured the route from
+`?url=` to a `/:encodedUrl` path segment (see the `96e98e3` /
+`79d6e10` commits) on the theory that CDP's facilitator rejects any
+resource URL containing a query string. Still failed. Directly
+disproved later by noticing `/v1/uprock/fetch?url=...` -- a route with
+a real, unencoded query string -- settles fine.
+3. **Percent-encoded characters.** The `:encodedUrl` path segment
+necessarily contains `%3A%2F%2F` (an encoded URL-in-a-URL). Removed
+every literal `%` character from the route's *static* description and
+`pathParams` example text (commit `0d97b8f`) on the theory that CDP or
+the SDK chokes on percent sequences somewhere in the declaration.
+Still failed.
+4. **Port number / self-reference.** Tested with `https://example.com`
+(no port, not the seller's own host) instead of the real self-referential
+`organiccryptoyyc.com:8443` argument. Still failed identically, ruling
+out both port numbers and self-referential URLs as factors.
+5. **Root cause, confirmed:** the *size and nesting depth* of the
+route's Bazaar discovery-extension content (`description` +
+`output.example`). seller-trust's declaration carried a ~700-character
+description and a deeply nested example object (`resourcesProbed[]`,
+`ipIntelligence{}`, `scoringReasons[]`) -- by far the largest discovery
+payload on this server. Stripping it down to a minimal declaration
+matching `/v1/geo/ip`'s style (one-line description, a 3-field example --
+commit `fd64c6e`) fixed it immediately; the very next live test settled
+on the first try, self-referential URL and all.
+
+**Important: this was a discovery-metadata problem only, not a functional
+one.** The actual JSON the route returns to a paying caller was never
+touched -- `getX402SellerTrust()` in `dataSources.js` still returns the
+full composite object (bazaarListed, resourcesProbed, ipIntelligence,
+trustScore, scoringReasons, etc.) exactly as before. Only the
+`declareDiscoveryExtension()` example shown to Bazaar crawlers was
+trimmed.
+
+**Open question / follow-up:** the exact size threshold where CDP's
+facilitator (or the SDK's payload construction) starts rejecting large
+discovery-extension content was not isolated -- only that "very large"
+fails and "minimal" works. If a richer Bazaar listing is wanted later,
+bisect the `output.example` size upward from the current minimal version
+and retest with a real payment after each step, the same way this was
+found. Don't assume a size that "looks reasonable" is safe without a live
+test -- every earlier theory in this list looked equally reasonable and
+was wrong.
+
+Live-verified working call, for reference:
+```
+node pay-test-debug.mjs "/v1/x402/seller-trust/https%3A%2F%2Forganiccryptoyyc.com%3A8443"
+```
+
 ## Routes and pricing
 
 | Route | Price | What it returns |

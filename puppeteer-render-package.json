@@ -1,0 +1,19 @@
+{
+  "name": "puppeteer-render",
+  "version": "0.1.0",
+  "description": "Internal-only headless-Chrome rendering service backing GET /v1/render/screenshot -- not reachable outside the docker network.",
+  "type": "module",
+  "main": "puppeteer-render.js",
+  "scripts": {
+    "start": "node puppeteer-render.js",
+    "check": "node --check puppeteer-render.js"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "puppeteer-core": "^23.0.0"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "license": "MIT"
+}

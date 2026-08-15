@@ -903,7 +903,7 @@ export const routes = {
     }),
   },
 
-  "GET /v1/x402/seller-trust": {
+  "GET /v1/x402/seller-trust/:encodedUrl": {
     accepts: multiNetworkAccepts(0.23),
     description:
       "Composite trust score for an x402 SELLER (not a POKT supplier): live Bazaar usage/social proof " +
@@ -916,15 +916,22 @@ export const routes = {
       "facilitator -- a seller on a different/self-hosted facilitator may show zero Bazaar usage despite " +
       "being legitimately paid elsewhere.",
     extensions: declareDiscoveryExtension({
-      input: { url: "https://example.com:8443" },
-      inputSchema: {
+      pathParams: { encodedUrl: "https%3A%2F%2Fexample.com%3A8443" },
+      pathParamsSchema: {
         properties: {
-          url: {
+          encodedUrl: {
             type: "string",
-            description: "Seller's base URL including scheme and port if non-standard, e.g. 'https://example.com:8443'",
+            description:
+              "Seller's base URL (scheme + host + port if non-standard), percent-encoded as a single path " +
+              "segment via encodeURIComponent, e.g. encodeURIComponent('https://example.com:8443') -> " +
+              "'https%3A%2F%2Fexample.com%3A8443'. A raw, un-encoded query-string form of this route " +
+              "(?url=...) previously failed 100% of live payments -- CDP's facilitator rejects any resource " +
+              "URL containing a query string, confirmed by bisecting price to an exact match with a working " +
+              "route and by testing with the query value itself percent-encoded (both still failed). This " +
+              "path-param form has no query string.",
           },
         },
-        required: ["url"],
+        required: ["encodedUrl"],
       },
       output: {
         example: {

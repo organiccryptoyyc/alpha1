@@ -185,7 +185,7 @@ function buildX402Manifest() {
     name: "organiccryptoyyc.com — Multi-Region Verification & On-Chain Data API",
     description:
       "Real-device, multi-region site verification with screenshot proof, live Pocket Network Shannon " +
-      "relay-demand/tokenomics/validator-security data, and Solana/peaq/BSC on-chain snapshots -- 19 metered " +
+      "relay-demand/tokenomics/validator-security data, and Solana/peaq/BSC on-chain snapshots -- " + resources.length + metered " +
       "x402 routes, priced and settled per call in USDC. Migrating to Acurast decentralized cloud compute for " +
       "censorship-resistant hosting -- stay tuned.",
     resources,
@@ -349,7 +349,7 @@ function buildOpenApiSpec() {
       version: "1.0.0",
       description:
         "Real-device, multi-region site verification with screenshot proof, live Pocket Network Shannon " +
-        "relay-demand/tokenomics/validator-security data, and Solana/peaq/BSC on-chain snapshots -- 19 metered " +
+        "relay-demand/tokenomics/validator-security data, and Solana/peaq/BSC on-chain snapshots -- " + Object.keys(routes).length +  metered " +
         "x402 routes, priced and settled per call in USDC. Migrating to Acurast decentralized cloud compute for " +
         "censorship-resistant hosting -- stay tuned.",
       "x-guidance":

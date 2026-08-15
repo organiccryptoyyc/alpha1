@@ -1557,3 +1557,71 @@ export async function getX402SellerTrust(baseUrl) {
     fetchedAt: new Date().toISOString(),
   };
 }
+// --- Headless-Chrome screenshot render (Puppeteer) --------------------------
+// PATCH (2026-08-15): backs GET /v1/render/screenshot. Unlike every other
+// route in this file, the actual rendering work happens in a SEPARATE
+// container (puppeteer-render.js) -- headless Chrome's resource footprint
+// (100-300MB RAM, real CPU per render) is a different order of magnitude
+// than this file's lightweight RPC/API pass-throughs, so it's isolated in
+// its own service instead of run in this process. See puppeteer-render.js
+// for the full "why a separate container" rationale, and docker-compose.yml
+// for how the two containers are wired together.
+//
+// SSRF hardening: reuses the exact same isBlockedTarget() denylist that
+// guards getUprockFetch/getX402SellerTrust above -- a caller-supplied URL is
+// checked here, BEFORE it's ever handed to the render service, not inside
+// that service (same "check once, at the edge closest to the caller"
+// pattern already established in this file).
+const PUPPETEER_RENDER_URL = process.env.PUPPETEER_RENDER_URL || "http://puppeteer-render:3002";
+// Above puppeteer-render.js's own 15s navigation timeout, so THAT service's
+// more specific error (e.g. "render failed: Navigation timeout...") surfaces
+// to the caller instead of this file's generic "unreachable" message racing
+// it.
+const RENDER_TIMEOUT_MS = 20_000;
+
+export async function getPuppeteerScreenshot(targetUrl) {
+  if (!targetUrl) throw new Error("url query param is required");
+  let parsed;
+  try {
+    parsed = new URL(targetUrl);
+  } catch {
+    throw new Error("url must be a valid absolute URL, e.g. https://example.com");
+  }
+  if (!["http:", "https:"].includes(parsed.protocol)) {
+    throw new Error("url must use http or https");
+  }
+  if (isBlockedTarget(parsed.hostname)) {
+    throw new Error("url must not target a localhost, private, or link-local address");
+  }
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), RENDER_TIMEOUT_MS);
+  let res;
+  try {
+    res = await fetch(`${PUPPETEER_RENDER_URL}/screenshot`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ url: parsed.toString() }),
+      signal: controller.signal,
+    });
+  } catch (err) {
+    throw new Error(`puppeteer-render service unreachable: ${err.message}`);
+  } finally {
+    clearTimeout(timeout);
+  }
+
+  const json = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    throw new Error(json.error || `puppeteer-render service returned HTTP ${res.status}`);
+  }
+
+  return {
+    source: "puppeteer-screenshot",
+    url: parsed.toString(),
+    statusCode: json.statusCode ?? null,
+    width: json.width,
+    height: json.height,
+    screenshotBase64: json.screenshotBase64,
+    renderedAt: new Date().toISOString(),
+  };
+}

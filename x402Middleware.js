@@ -89,7 +89,7 @@ const facilitatorClient = new HTTPFacilitatorClient(facilitator);
 // peaq's published reference facilitator (github.com/peaqnetwork/x402-peaq)
 // couldn't be pointed to directly either -- it's pinned to the OLDER
 // pre-v2 `x402` package (v0.7), advertising x402Version 1 and a bare
-// `network: "peaq"` string rather than the v2 CAIP-2 `"eip155:3338"` this
+// `network: "peaq"` string rather than the v2 CAIP-2 "eip155:3338" this
 // server speaks. peaq-facilitator.js is a from-scratch v2-native rebuild
 // using @x402/core/facilitator + @x402/evm/exact/facilitator instead --
 // see that file's header comment for the full detail on why and how.
@@ -904,7 +904,7 @@ export const routes = {
   },
 
   "GET /v1/x402/seller-trust": {
-    accepts: multiNetworkAccepts(0.25),
+    accepts: multiNetworkAccepts(0.24),
     description:
       "Composite trust score for an x402 SELLER (not a POKT supplier): live Bazaar usage/social proof " +
       "(real settled-payment call and unique-payer counts, free from Coinbase's own discovery index), a " +

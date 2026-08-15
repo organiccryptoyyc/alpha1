@@ -861,6 +861,47 @@ export const routes = {
       },
     }),
   },
+  "GET /v1/pokt/supplier-trust/:operatorId": {
+    accepts: multiNetworkAccepts(0.05),
+    description:
+      "Composite trust score for a Pocket Network (Shannon) supplier: on-chain stake status " +
+      "(staked vs. unstaking) plus a live reachability probe of the supplier's own advertised " +
+      "service RPC endpoints, rolled into a single 0-100 trust score. Useful to Application and " +
+      "gateway operators deciding which suppliers to route relays to -- is this operator actually " +
+      "staked, in good standing, and serving traffic on the endpoints it advertises.",
+    extensions: declareDiscoveryExtension({
+      pathParams: { operatorId: "pokt1l8lttpkctge3a9zq62uq9n9jqclt4ptz77ymsw" },
+      pathParamsSchema: {
+        properties: {
+          operatorId: { type: "string", description: "POKT supplier operator address (bech32, pokt1...)" },
+        },
+        required: ["operatorId"],
+      },
+      output: {
+        example: {
+          source: "pokt-supplier-trust",
+          operatorId: "pokt1l8lttpkctge3a9zq62uq9n9jqclt4ptz77ymsw",
+          found: true,
+          stakeStatus: "Staked",
+          stakedPokt: 60499.99,
+          unstakingReason: null,
+          services: ["akash", "osmosis"],
+          endpointsProbed: [
+            { url: "https://akash-json-europe.highstakes.ch", reachable: true, statusCode: 200, responseTimeMs: 210 },
+            ],
+          endpointsTotalAdvertised: 8,
+          trustScore: 90,
+          verdict: "high-trust",
+          scoringReasons: [
+            "supplier is actively staked (+40)",
+            "5/5 advertised endpoints reachable (+40)",
+            "staked for 2 service(s) (+10)",
+            ],
+          fetchedAt: "2026-08-10T00:00:00.000Z",
+        },
+      },
+    }),
+  },
 };
 
 export function buildX402Middleware() {

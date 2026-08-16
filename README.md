@@ -321,10 +321,53 @@ large/deeply nested Bazaar discovery-extension declaration was the
 confirmed cause of that route's live-payment failures, independent of
 price or URL structure. No reason to risk repeating it here.
 
-**Status as of this write-up:** built, pushed, and syntax-checked; NOT yet
-live-tested against a real payment (same status every new route on this
-server carries before its first real test -- see `pay-test-debug.mjs` in
-the project notes for how prior routes were verified).
+**Status as of this write-up:** live-tested successfully -- the first real
+payment attempt against this route settled on the first try (no repeat of
+the seller-trust size-rejection failure above), confirming the minimal
+discovery-extension practice holds up in production, not just in theory.
+
+## HEIC to PNG conversion (2026-08-15)
+
+Added `GET /v1/convert/heic-to-png` -- converts a caller-supplied HEIC/HEIF
+image URL to PNG, returned base64-encoded in JSON (same response shape as
+`render/screenshot` above, for the same reason: every route on this server
+returns JSON, not a second binary-response code path). Built right after
+`puppeteer-render`, and worth contrasting with it: this route needed none
+of that architecture.
+
+**No separate container.** Unlike Puppeteer, `heic-convert` (the npm
+package backing this route) is pure JavaScript -- it wraps `libheif-js` (a
+WASM build of libheif) plus `pngjs`/`jpeg-js` for encoding, with zero
+native or system-library dependencies. There's no `apk add` step and no
+second docker-compose service the way `puppeteer-render` needed one --
+`getHeicToPng()` runs in-process in the existing `onchain-snapshot-api`
+image after a single `npm install heic-convert`. This is the real
+architectural distinction between the two routes shipped this session:
+Puppeteer needed isolation because headless Chrome's resource footprint
+(100-300MB RAM, real CPU per render) is a different order of magnitude
+from this file's other routes; HEIC decoding via WASM is not.
+
+**Size cap and SSRF hardening.** The source image is capped at 20MB
+(`HEIC_MAX_INPUT_BYTES`) -- checked against the `content-length` header
+where present and re-checked against the actual downloaded buffer size
+either way, since an unbounded upstream response decoded straight into
+memory is a real way to OOM this container, the same class of risk already
+flagged for `getUprockFetch`/`getPuppeteerScreenshot`. The source URL is
+checked against the same `isBlockedTarget()` denylist every other
+buyer-supplied-URL route in `dataSources.js` reuses.
+
+**Pricing ($0.005/call):** pure compute, no upstream credit cost -- same
+bottom tier as `geo/ip`, priced as a cheap, boring, high-frequency utility
+rather than a judgment-tier composite route.
+
+**Discovery-extension content kept deliberately minimal**, same reasoning
+as `render/screenshot` above: the seller-trust root-cause writeup earlier
+in this file identified a large/deeply nested Bazaar discovery-extension
+declaration as the confirmed cause of that route's live-payment failures.
+`pngBase64` is left out of the example output for the same reason
+`screenshotBase64` was left out of `render/screenshot`'s.
+
+**Status as of this write-up:** built, pushed, and syntax-checked.
 
 ## Routes and pricing
 

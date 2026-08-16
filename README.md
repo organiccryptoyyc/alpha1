@@ -588,6 +588,68 @@ established discipline after the ERC-8004 registry-address and peaq
 asset-name lessons), and adding the new env var(s) to `docker-compose.yml`
 following the same graceful-no-op-if-unset pattern as `UPROCK_API_KEY`.
 
+## OFAC sanctions screening (2026-08-16)
+
+Third build round of the day, following the historical chain-data round
+above. Adds `GET /v1/compliance/sanctions-check/:address` — screens an
+Ethereum or Solana address against OFAC's published Specially Designated
+Nationals (SDN) list, direct match only.
+
+**Data source.** OFAC's authoritative source is `sdn_advanced.xml`
+(~80MB, relational schema — names, addresses, documents, and digital
+currency IDs live in separate linked structures, not flat records):
+<https://www.treasury.gov/ofac/downloads/sanctions/1.0/sdn_advanced.xml>.
+Parsing that directly for a lightweight per-address lookup is more than
+this route needs. Instead this uses the `lists` branch of
+[0xB10C/ofac-sanctioned-digital-currency-addresses](https://github.com/0xB10C/ofac-sanctioned-digital-currency-addresses)
+(MIT-licensed) — a GitHub Actions workflow re-extracts and republishes
+that exact same OFAC XML nightly at 0 UTC as plain per-asset text files,
+one address per line. Verified directly by fetching both files before
+building this: the ETH list carried ~90 addresses and the SOL list
+carried 1 address as of 2026-08-16.
+
+**Scoped to ETH + Solana only**, same discipline as the historical
+chain-data round. The source also covers XBT, LTC, ZEC, DASH, BTG, ETC,
+BSV, BCH, XVG, USDC, USDT, XRP, TRX, ARB, and BSC — extending this route
+to any of those is a config change (add a `chain` entry to
+`OFAC_LIST_URLS` in `dataSources.js`), not a redesign, if demand shows up
+for another chain.
+
+**Caching.** The list is fetched once and held in an in-process
+module-level cache with a 6-hour TTL, separate from the per-request
+`cached()` helper used by every other route in `server.js`. That helper
+caches a whole response by request key; what needs caching here is the
+multi-KB list itself, shared across every address lookup regardless of
+which address is asked about. Once the list is loaded, answering a
+specific address is a free `Set.has()` — not worth caching again on top
+of that. 6 hours just bounds how stale this server's own copy can get
+between the source's nightly (0 UTC) regenerations; it isn't a real-time
+freshness guarantee, and every response reports its own `listSyncedAt`
+timestamp so a caller can see exactly how fresh the answer is.
+
+**What this route does and doesn't do.** This is a *direct* address
+match against the published list — nothing more. It does not do
+multi-hop / indirect-exposure clustering (funds that passed through a
+sanctioned address via one or more intermediary wallets are not flagged),
+which is the harder, higher-value problem commercial products like
+Chainalysis's Sentinel solve. Every response's `note` field says this
+explicitly, and the route is priced accordingly — a real, legally
+meaningful check (screening against OFAC's own public list is the
+minimum bar most compliance obligations require), but not a full
+compliance program on its own.
+
+**Pricing:** $0.015/call — above the $0.01–$0.012 bounded-lookup tier
+(this involves loading and holding a real government data list, not just
+a stateless RPC pass-through) and below the $0.03 composite-trust-score
+tier (no multi-source aggregation or scoring logic, just a set-membership
+check).
+
+**Zero new dependencies, zero new containers, zero new env vars required**
+(two optional ones — `OFAC_ETH_LIST_URL` / `OFAC_SOL_LIST_URL` — let the
+source URLs be overridden without a code change, same pattern as every
+other externally-sourced URL in this file, but both have working
+defaults baked in).
+
 ## Routes and pricing
 
 | Route | Price | What it returns |

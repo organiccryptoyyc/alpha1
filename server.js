@@ -41,6 +41,7 @@ import {
   getBscBalance,
   getIpGeolocation,
   getPuppeteerScreenshot,
+  getHeicToPng,
 } from "./dataSources.js";
 
 const app = express();
@@ -686,6 +687,20 @@ app.get("/v1/render/screenshot", async (req, res, next) => {
     const { url } = req.query;
     if (!url) return res.status(400).json({ error: "url query param is required" });
     res.json(await cached(`render:screenshot:${url}`, 30, () => getPuppeteerScreenshot(url)));
+  } catch (err) {
+    next(err);
+  }
+});
+
+// HEIC to PNG conversion. $0.005/call, pure compute -- no second container
+// needed the way render/screenshot needed one. 60s cache: converting the
+// same source URL twice inside that window is free margin instead of a
+// repeat decode.
+app.get("/v1/convert/heic-to-png", async (req, res, next) => {
+  try {
+    const { url } = req.query;
+    if (!url) return res.status(400).json({ error: "url query param is required" });
+    res.json(await cached(`convert:heic-to-png:${url}`, 60, () => getHeicToPng(url)));
   } catch (err) {
     next(err);
   }

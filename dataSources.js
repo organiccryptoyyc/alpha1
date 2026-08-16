@@ -1710,3 +1710,264 @@ export async function getHeicToPng(targetUrl) {
     convertedAt: new Date().toISOString(),
   };
 }
+
+
+// --- Web search (self-hosted SearXNG) --------------------------------------
+// PATCH (2026-08-16): backs GET /v1/search/web. Unlike every URL-fetching
+// route above, this takes a caller-supplied QUERY STRING, not a URL -- there
+// is no buyer-controlled target host to SSRF-check here, since the only
+// thing this route ever fetches is our own internal searxng service.
+//
+// Runs its own SearXNG instance (see docker-compose.yml's searxng service)
+// rather than paying a third-party search API per call -- SearXNG is a free,
+// open-source metasearch engine that aggregates results from 70+ upstream
+// engines (Google, Bing, DuckDuckGo, etc.) with no API key. Same "own the
+// infra, keep the margin" reasoning as heic-convert above, but packaged as
+// its own container (like puppeteer-render) rather than an in-process npm
+// package, since SearXNG ships as a ready-made Docker image -- there's
+// nothing to npm-install here.
+//
+// Known caveat, disclosed honestly: SearXNG works by scraping the HTML
+// result pages of upstream search engines. That's inherently less stable
+// than a real search API -- an upstream engine changing its markup, or
+// rate-limiting/blocking this box's IP, can degrade or break results
+// without warning. Acceptable for this project's current volume; revisit
+// (e.g. swap in a paid engine like Tavily/Brave behind the same route
+// signature) if reliability becomes a real problem.
+const SEARXNG_URL = process.env.SEARXNG_URL || "http://searxng:8080";
+const SEARCH_TIMEOUT_MS = 8000;
+const SEARCH_RESULT_LIMIT = 10;
+const SEARCH_QUERY_MAX_LEN = 500;
+
+export async function getWebSearch(query, { limit } = {}) {
+  const trimmed = String(query || "").trim();
+  if (!trimmed) throw new Error("q query param is required");
+  if (trimmed.length > SEARCH_QUERY_MAX_LEN) {
+    throw new Error(`q must be ${SEARCH_QUERY_MAX_LEN} characters or fewer`);
+  }
+  const capped = Math.max(1, Math.min(Number(limit) || SEARCH_RESULT_LIMIT, SEARCH_RESULT_LIMIT));
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), SEARCH_TIMEOUT_MS);
+  let res;
+  try {
+    const url = `${SEARXNG_URL}/search?q=${encodeURIComponent(trimmed)}&format=json`;
+    res = await fetch(url, { signal: controller.signal });
+  } catch (err) {
+    throw new Error(`searxng service unreachable: ${err.name === "AbortError" ? "timeout" : err.message}`);
+  } finally {
+    clearTimeout(timeout);
+  }
+  if (!res.ok) {
+    throw new Error(`searxng service returned HTTP ${res.status}`);
+  }
+  const json = await res.json().catch(() => ({}));
+  const rawResults = Array.isArray(json.results) ? json.results : [];
+
+  const results = rawResults.slice(0, capped).map((r) => ({
+    title: r.title ?? null,
+    url: r.url ?? null,
+    snippet: r.content ?? null,
+    engine: r.engine ?? null,
+  }));
+
+  return {
+    source: "searxng",
+    query: trimmed,
+    resultCount: results.length,
+    results,
+    fetchedAt: new Date().toISOString(),
+  };
+}
+
+// --- ERC-8004 agent reputation ----------------------------------------------
+// PATCH (2026-08-16): backs GET /v1/agent/reputation/:agentId. Looks up an
+// AI agent's on-chain identity + aggregated feedback via the ERC-8004
+// "Trustless Agents" standard (eips.ethereum.org/EIPS/eip-8004) -- distinct
+// from every other trust route in this file: getBrandVerify/getX402SellerTrust
+// score DOMAINS/SELLERS, getPoktSupplierTrust scores POKT infrastructure
+// operators, getPeaqMachineVerification verifies IoT/machine identity --
+// none of them answer "does this AI AGENT have a real track record."
+//
+// Registry addresses confirmed directly from erc-8004/erc-8004-contracts's
+// README (github.com/erc-8004/erc-8004-contracts), not assumed -- both
+// registries are deployed via CREATE2 at the SAME address on every chain
+// they support (Ethereum, Base, BSC, Polygon, Arbitrum, and others), which
+// is why this route can support multiple chains with zero new
+// contract-address configuration.
+import { Interface } from "ethers";
+
+const ERC8004_IDENTITY_REGISTRY = "0x8004A169FB4a3325136EB29fA0ceB6D2e539a432";
+const ERC8004_REPUTATION_REGISTRY = "0x8004BAa17C55a88189AE136b182e5fdA19dE9b63";
+
+// Reuses this project's existing ETH_RPC_URL/BSC_RPC_URL -- ERC-8004 has no
+// live deployment on peaq or Solana, so those two are the only chains this
+// route can serve without adding a brand-new RPC env var.
+function erc8004RpcUrl(chainKey) {
+  if (chainKey === "eth") return ETH_RPC_URL;
+  if (chainKey === "bsc") return BSC_RPC_URL;
+  return null;
+}
+
+// Minimal read-only ABI -- just the functions this route calls. ethers is
+// used ONLY for its ABI encoder/decoder (encodeFunctionData /
+// decodeFunctionResult); the actual JSON-RPC round trip reuses this file's
+// existing rpcCall() helper, the same one every other eth_call in this file
+// goes through, rather than pulling in ethers' own Provider/network stack.
+const ERC8004_IDENTITY_ABI = [
+  "function ownerOf(uint256 tokenId) view returns (address)",
+  "function tokenURI(uint256 tokenId) view returns (string)",
+  "function getAgentWallet(uint256 agentId) view returns (address)",
+];
+const ERC8004_REPUTATION_ABI = [
+  "function getClients(uint256 agentId) view returns (address[])",
+  "function readAllFeedback(uint256 agentId, address[] clientAddresses, string tag1, string tag2, bool includeRevoked) view returns (address[] clients, uint64[] feedbackIndexes, int128[] values, uint8[] valueDecimals, string[] tag1s, string[] tag2s, bool[] revokedStatuses)",
+];
+const erc8004IdentityIface = new Interface(ERC8004_IDENTITY_ABI);
+const erc8004ReputationIface = new Interface(ERC8004_REPUTATION_ABI);
+
+async function erc8004Call(rpcUrl, to, iface, fn, args) {
+  const data = iface.encodeFunctionData(fn, args);
+  const resultHex = await rpcCall(rpcUrl, "eth_call", [{ to, data }, "latest"]);
+  return iface.decodeFunctionResult(fn, resultHex);
+}
+
+// Bounded on purpose, same discipline as every other probe/aggregate route
+// in this file -- an agent with an unusually large feedback history
+// shouldn't turn one x402-paid call into unbounded client-side processing.
+const ERC8004_MAX_FEEDBACK_ENTRIES = 2000;
+
+export async function getAgentReputation(agentIdRaw, { chain = "eth" } = {}) {
+  const chainKey = String(chain || "eth").toLowerCase();
+  const rpcUrl = erc8004RpcUrl(chainKey);
+  if (!rpcUrl) {
+    throw new Error(
+      "chain must be 'eth' or 'bsc' -- ERC-8004 has no live deployment on this project's other supported chains"
+    );
+  }
+
+  let agentId;
+  try {
+    agentId = BigInt(String(agentIdRaw));
+    if (agentId < 0n) throw new Error("negative");
+  } catch {
+    throw new Error("agentId must be a non-negative integer");
+  }
+
+  let owner;
+  try {
+    [owner] = await erc8004Call(rpcUrl, ERC8004_IDENTITY_REGISTRY, erc8004IdentityIface, "ownerOf", [agentId]);
+  } catch {
+    // Revert (ERC721NonexistentToken or equivalent) -- not a registered
+    // agent. Same "not-found is a legitimate answer, not an upstream
+    // failure" posture as getPeaqMachineVerification's 404 case above.
+    return {
+      source: "erc8004-agent-reputation",
+      chain: chainKey,
+      agentId: agentId.toString(),
+      registered: false,
+      fetchedAt: new Date().toISOString(),
+    };
+  }
+
+  const [agentURI] = await erc8004Call(rpcUrl, ERC8004_IDENTITY_REGISTRY, erc8004IdentityIface, "tokenURI", [agentId]);
+  const [agentWallet] = await erc8004Call(
+    rpcUrl,
+    ERC8004_IDENTITY_REGISTRY,
+    erc8004IdentityIface,
+    "getAgentWallet",
+    [agentId]
+  );
+  const [clients] = await erc8004Call(rpcUrl, ERC8004_REPUTATION_REGISTRY, erc8004ReputationIface, "getClients", [
+    agentId,
+  ]);
+
+  // Empty clientAddresses array makes the contract itself default to its
+  // full stored client list; empty tag1/tag2 strings mean "no filter" --
+  // both confirmed directly from ReputationRegistryUpgradeable.sol source
+  // (the contract compares keccak256(tag) against keccak256("") to decide
+  // whether to skip filtering at all), not assumed from the written spec.
+  const [, , values, valueDecimals, tag1s, , revokedStatuses] = await erc8004Call(
+    rpcUrl,
+    ERC8004_REPUTATION_REGISTRY,
+    erc8004ReputationIface,
+    "readAllFeedback",
+    [agentId, [], "", "", false]
+  );
+
+  const cap = Math.min(values.length, ERC8004_MAX_FEEDBACK_ENTRIES);
+  const truncated = values.length > ERC8004_MAX_FEEDBACK_ENTRIES;
+
+  // Grouped by tag1 -- blending unrelated signals (e.g. "uptime" percentages
+  // with "starred" 0-100 ratings) into one average would be close to
+  // meaningless, same reasoning that keeps every other composite score in
+  // this file (brand-verify, seller-trust, supplier-trust) broken into
+  // named pillars rather than one raw blended number.
+  const byTag = new Map();
+  for (let i = 0; i < cap; i++) {
+    if (revokedStatuses[i]) continue;
+    const tag = tag1s[i] || "(untagged)";
+    const decimals = Number(valueDecimals[i]);
+    const normalized = Number(values[i]) / 10 ** decimals;
+    const bucket = byTag.get(tag) || { tag1: tag, count: 0, sum: 0 };
+    bucket.count += 1;
+    bucket.sum += normalized;
+    byTag.set(tag, bucket);
+  }
+  const feedbackByTag = Array.from(byTag.values()).map((b) => ({
+    tag1: b.tag1,
+    count: b.count,
+    averageValue: Number((b.sum / b.count).toFixed(4)),
+  }));
+  const feedbackCount = feedbackByTag.reduce((sum, b) => sum + b.count, 0);
+
+  // Best-effort: the agent's registration file (name/description/services),
+  // fetched only if agentURI is a plain https:// URL -- ipfs:// and
+  // data:application/json;base64 URIs are valid per the ERC-8004 spec but
+  // out of scope for v1 (no IPFS gateway wired up yet). Non-fatal on
+  // failure, same posture as getPeaqMachineVerification's /machines
+  // enrichment call above.
+  let registrationFile = null;
+  if (agentURI && agentURI.startsWith("https://")) {
+    try {
+      const parsedUri = new URL(agentURI);
+      if (!isBlockedTarget(parsedUri.hostname)) {
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 5000);
+        try {
+          const res = await fetch(agentURI, { signal: controller.signal });
+          if (res.ok) {
+            const json = await res.json();
+            registrationFile = {
+              name: json.name ?? null,
+              description: json.description ?? null,
+              services: Array.isArray(json.services) ? json.services : [],
+              x402Support: json.x402Support ?? null,
+              active: json.active ?? null,
+            };
+          }
+        } finally {
+          clearTimeout(timeout);
+        }
+      }
+    } catch {
+      // Non-fatal -- enrichment only.
+    }
+  }
+
+  return {
+    source: "erc8004-agent-reputation",
+    chain: chainKey,
+    agentId: agentId.toString(),
+    registered: true,
+    owner,
+    agentWallet: agentWallet === "0x0000000000000000000000000000000000000000" ? null : agentWallet,
+    agentURI: agentURI || null,
+    registrationFile,
+    uniqueClients: clients.length,
+    feedbackCount,
+    feedbackByTag,
+    feedbackTruncated: truncated,
+    fetchedAt: new Date().toISOString(),
+  };
+}

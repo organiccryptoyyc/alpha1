@@ -1035,6 +1035,52 @@ export const routes = {
       },
     }),
   },
+  // Tier A historical/indexed chain data (2026-08-16) -- ETH + Solana only
+  // for this round (BSC/peaq deferred, see README's Tier B notes section).
+  // Zero new dependencies or containers: both reuse the existing
+  // ETH_RPC_URL/SOL_RPC_URL infra already wired up for the snapshot routes
+  // above. Both are bounded to recent history, not full-archive -- see
+  // getEthLogs()/getSolTransactionHistory() in dataSources.js for exactly
+  // why (undocumented per-provider eth_getLogs block-range ceilings; the
+  // Solana RPC spec's own hard 1000-signature cap on getSignaturesForAddress).
+  "GET /v1/eth/logs": {
+    accepts: multiNetworkAccepts(0.012),
+    description: "Recent Ethereum event logs for a contract/address (bounded to the last 1000 blocks, not full-archive history).",
+    extensions: declareDiscoveryExtension({
+      queryParams: {
+        properties: {
+          address: { type: "string", description: "Contract or wallet address to filter logs by" },
+          topic0: { type: "string", description: "Optional event signature hash to filter by" },
+          blocks: { type: "string", description: "How many recent blocks to search, max 1000 (default 500)" },
+        },
+        required: ["address"],
+      },
+      output: {
+        example: { source: "eth-logs", blocksSearched: 500, logCount: 3 },
+      },
+    }),
+  },
+  "GET /v1/sol/history/:address": {
+    accepts: multiNetworkAccepts(0.01),
+    description: "Recent Solana transaction signatures for an address (most recent up to 100, not full history since genesis).",
+    extensions: declareDiscoveryExtension({
+      pathParams: { address: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v" },
+      pathParamsSchema: {
+        properties: {
+          address: { type: "string", description: "Base58 Solana address" },
+        },
+        required: ["address"],
+      },
+      queryParams: {
+        properties: {
+          limit: { type: "string", description: "Number of recent transactions to return, max 100 (default 20)" },
+        },
+      },
+      output: {
+        example: { source: "sol-history", count: 20 },
+      },
+    }),
+  },
 };
 
 export function buildX402Middleware() {

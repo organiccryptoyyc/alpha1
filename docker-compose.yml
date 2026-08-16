@@ -62,7 +62,10 @@ services:
       # graceful-default pattern as ETH_RPC_URL/PEAQ_RPC_URL above. Powers
       # GET /v1/bsc/gas-price, /v1/bsc/latest-block, and the 'bsc' option on
       # /v1/wallet/balance/:chain/:address regardless of BSC's payment-network
-      # status below.
+      # status below. Also reused by GET /v1/agent/reputation/:agentId
+      # (?chain=bsc) below -- ERC-8004's registries are deployed at the same
+      # address on BSC as on Ethereum, so no separate RPC var was needed for
+      # that route.
       BSC_RPC_URL: ${BSC_RPC_URL}
       # BSC as a PAYMENT network is scaffolded but NOT yet active -- see the
       # BSC scaffolding note at the top of x402Middleware.js. Setting this
@@ -103,9 +106,17 @@ services:
       # code, so this only needs setting in Portainer if you point it
       # somewhere else.
       PUPPETEER_RENDER_URL: ${PUPPETEER_RENDER_URL}
+      # PATCH (2026-08-16): self-hosted metasearch service backing
+      # GET /v1/search/web -- see the searxng service below and
+      # getWebSearch() in dataSources.js. Same optional/graceful-default
+      # pattern as PUPPETEER_RENDER_URL above -- defaults to
+      # http://searxng:8080 in code, only needs setting here if pointed
+      # somewhere else.
+      SEARXNG_URL: ${SEARXNG_URL}
     depends_on:
       - sol-rpc-cache
       - puppeteer-render
+      - searxng
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://localhost:4021/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
       interval: 30s
@@ -179,6 +190,29 @@ services:
     restart: unless-stopped
     environment:
       PORT: "3002"
+
+  searxng:
+    # Internal-only self-hosted metasearch aggregator backing
+    # GET /v1/search/web -- see getWebSearch() in dataSources.js. Unlike
+    # puppeteer-render/peaq-facilitator/sol-rpc-cache above, this uses the
+    # official upstream image directly rather than a custom Dockerfile --
+    # SearXNG ships as a ready-made Docker image with its own Python/uwsgi
+    # runtime, there's nothing of this project's own to build or npm-install
+    # into it. No ports published to the host; reachable from
+    # onchain-snapshot-api only by its service name over the docker network,
+    # same isolation pattern as every other internal service in this file.
+    # searxng-settings.yml (mounted read-only below) turns on JSON output
+    # format and disables SearXNG's own rate limiter -- both off by default
+    # upstream (aimed at public-facing deployments), neither needed here
+    # since the only caller is this project's own container on the internal
+    # docker network, not the public internet.
+    image: searxng/searxng:latest
+    container_name: onchain-snapshot-searxng
+    restart: unless-stopped
+    volumes:
+      - ./searxng-settings.yml:/etc/searxng/settings.yml:ro
+    environment:
+      SEARXNG_BASE_URL: http://searxng:8080/
 
   caddy:
     # Terminates TLS and reverse-proxies to onchain-snapshot-api over the

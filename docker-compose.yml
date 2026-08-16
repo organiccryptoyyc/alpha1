@@ -193,24 +193,27 @@ services:
 
   searxng:
     # Internal-only self-hosted metasearch aggregator backing
-    # GET /v1/search/web -- see getWebSearch() in dataSources.js. Unlike
-    # puppeteer-render/peaq-facilitator/sol-rpc-cache above, this uses the
-    # official upstream image directly rather than a custom Dockerfile --
-    # SearXNG ships as a ready-made Docker image with its own Python/uwsgi
-    # runtime, there's nothing of this project's own to build or npm-install
-    # into it. No ports published to the host; reachable from
-    # onchain-snapshot-api only by its service name over the docker network,
-    # same isolation pattern as every other internal service in this file.
-    # searxng-settings.yml (mounted read-only below) turns on JSON output
-    # format and disables SearXNG's own rate limiter -- both off by default
-    # upstream (aimed at public-facing deployments), neither needed here
-    # since the only caller is this project's own container on the internal
-    # docker network, not the public internet.
-    image: searxng/searxng:latest
+    # GET /v1/search/web -- see getWebSearch() in dataSources.js.
+    #
+    # INCIDENT (2026-08-16): originally shipped as `image: searxng/searxng`
+    # + a runtime bind-mount of searxng-settings.yml. That crash-looped in
+    # production -- on this container's very first creation, Docker found no
+    # file yet at the host bind-mount source path and silently created an
+    # empty DIRECTORY there instead, so the container's own boot script hit
+    # "cp: '/etc/searxng/settings.yml' is a directory" / "is not a valid
+    # file, exiting" every time it started. Recreating the container does
+    # NOT fix this -- Docker keeps reusing the same (now permanently-a-
+    # directory) host path. Switched to a custom Dockerfile (like every
+    # other custom service in this file) that COPies the settings file in
+    # at BUILD time instead -- that operates on the git-cloned build
+    # context, not a live/racy bind mount, so it can't hit this failure
+    # mode. See searxng.Dockerfile.
+    build:
+      context: .
+      dockerfile: searxng.Dockerfile
+    image: umbrel-onchain-snapshot-searxng:latest
     container_name: onchain-snapshot-searxng
     restart: unless-stopped
-    volumes:
-      - ./searxng-settings.yml:/etc/searxng/settings.yml:ro
     environment:
       SEARXNG_BASE_URL: http://searxng:8080/
 

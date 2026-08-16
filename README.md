@@ -369,6 +369,119 @@ declaration as the confirmed cause of that route's live-payment failures.
 
 **Status as of this write-up:** built, pushed, and syntax-checked.
 
+## Web search: self-hosted SearXNG (2026-08-16)
+
+Added `GET /v1/search/web` -- takes a caller-supplied query string and
+returns title/url/snippet/engine per result, backed by a self-hosted
+[SearXNG](https://docs.searxng.org/) instance (a free, open-source,
+keyless metasearch engine that aggregates 70+ upstream engines: Google,
+Bing, DuckDuckGo, and others). This is the first route in this file whose
+buyer input is a query string rather than a URL, so there's no
+buyer-controlled target host to SSRF-check the way every UpRock/render/
+HEIC route above needs -- the only thing this route ever fetches is our
+own internal `searxng` container.
+
+**Own infra, not a paid search API.** Same "own the infra, keep the
+margin" reasoning as `heic-convert`, but packaged as its own container
+(like `puppeteer-render`) rather than an in-process npm package, since
+SearXNG ships as a ready-made Docker image with its own Python/uwsgi
+runtime -- there's nothing of this project's own to build or npm-install.
+`searxng-settings.yml` (mounted read-only into the container) turns on two
+things that are OFF by default upstream, confirmed directly from SearXNG's
+own docs, not assumed: JSON output format (`search.formats: json`) and,
+since this instance is internal-only and never reachable from outside the
+docker network, SearXNG's own bot-detection rate limiter (`server.limiter:
+false`) -- left on, it would block this project's own JSON requests, since
+it's aimed at public-facing deployments getting scraped.
+
+**Pricing ($0.008/call):** positioned between Exa ($0.004) and Tavily
+($0.01), the two closest live x402-marketplace search comparables found
+during the marketplace gap-analysis research. No per-call upstream credit
+cost (self-hosted, free, keyless) -- same margin story as `heic-to-png`.
+
+**Known caveat, disclosed honestly:** SearXNG works by scraping the HTML
+result pages of upstream search engines. That's inherently less stable
+than a real search API -- an upstream engine changing its markup, or
+rate-limiting/blocking this box's IP, can degrade or break results without
+warning. Acceptable at this project's current volume; revisit (e.g. swap
+in a paid engine like Tavily/Brave behind the same route signature) if
+reliability becomes a real problem.
+
+**Discovery-extension content kept deliberately minimal**, same reasoning
+as every route added since the seller-trust root-cause writeup earlier in
+this file.
+
+**Status as of this write-up:** built, pushed, and syntax-checked --
+NOT yet live-tested against a real payment. The `searxng` container is
+also new to the stack, so its first Portainer deploy pulls the official
+image fresh rather than rebuilding a locally-built image.
+
+## Agent reputation: ERC-8004 lookup (2026-08-16)
+
+Added `GET /v1/agent/reputation/:agentId` (optional `?chain=eth|bsc`) --
+looks up an AI agent's on-chain identity and aggregated feedback via the
+[ERC-8004 "Trustless Agents"](https://eips.ethereum.org/EIPS/eip-8004)
+standard. Distinct from every other trust/verification route already on
+this server: `brand-verify`/`x402-seller-trust` score domains and x402
+sellers, `pokt-supplier-trust` scores POKT infrastructure operators, and
+`peaq/machine-verify` verifies IoT/machine identity -- none of them answer
+"does this AI agent have a real, on-chain track record."
+
+**Registry addresses confirmed from source, not assumed.** ERC-8004's
+Identity and Reputation registries are deployed via CREATE2 at the same
+address on every supported EVM chain (confirmed live from
+`erc-8004/erc-8004-contracts`'s own GitHub README across dozens of chains,
+including both Ethereum and BSC mainnet, which this project already has
+RPC access to) -- so this one route supports multiple chains with zero
+per-chain contract-address configuration. Only `eth` and `bsc` are wired
+up here since those are the only two chains this project already has an
+RPC endpoint for; ERC-8004 has no live deployment on peaq or Solana.
+
+**ABI semantics verified against the actual Solidity source**, not the
+spec prose -- this project's established discipline after past incidents
+(the peaq asset-name bug, POKT's empty `relays` connection) where trusting
+documentation over live/source behavior caused real bugs. Specifically:
+`readAllFeedback`'s empty `tag1`/`tag2` string parameters mean "no
+filter" (the contract compares `keccak256(tag)` against `keccak256("")`
+to decide whether to apply a filter at all), and an empty
+`clientAddresses` array makes the contract default to its full stored
+client list internally -- both read directly from
+`ReputationRegistryUpgradeable.sol`, not assumed from the written EIP.
+
+**Uses `ethers` for ABI encode/decode only.** Added purely for its
+`Interface` class (`encodeFunctionData`/`decodeFunctionResult`) --
+deliberately NOT using ethers' own Provider/network stack. The actual
+JSON-RPC round trip reuses this file's existing `rpcCall()` helper, the
+same one every other `eth_call` in `dataSources.js` goes through, rather
+than introducing a second RPC-calling pattern. Reasoning: a silent
+hand-rolled ABI-decode bug (serving a wrong reputation score with no
+error) is a worse failure mode than a thrown error, so this leans on a
+well-tested library for that one piece rather than hand-rolling
+dynamic-array/string ABI codec logic.
+
+**Bounded processing.** `ERC8004_MAX_FEEDBACK_ENTRIES` caps client-side
+feedback aggregation at 2000 entries -- an agent with an unusually large
+feedback history shouldn't turn one x402-paid call into unbounded
+processing, same Three S Framework discipline already applied to every
+other aggregate/composite route in this file.
+
+**Pricing ($0.03/call):** same tier as `peaq/machine-verify`, the closest
+architectural analog -- a small number of read-only `eth_call`s against a
+known contract, no external paid API.
+
+**Discovery-extension content kept deliberately minimal**, same reasoning
+as every route added since the seller-trust root-cause writeup. The
+example `agentId` (`47167`) is a real agent ID surfaced during the
+marketplace gap-analysis research (an `agentutility`/x402.agentutility.ai
+listing on x402scan), chosen as a plausible real test candidate --
+though this hasn't been confirmed to actually be a minted ERC-8004 agent
+on Ethereum or BSC specifically. If it isn't, the route should gracefully
+return `registered: false`, which is itself a valid test of that code
+path.
+
+**Status as of this write-up:** built, pushed, and syntax-checked --
+NOT yet live-tested against a real payment.
+
 ## Routes and pricing
 
 | Route | Price | What it returns |

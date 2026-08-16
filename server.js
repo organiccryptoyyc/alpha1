@@ -42,6 +42,8 @@ import {
   getIpGeolocation,
   getPuppeteerScreenshot,
   getHeicToPng,
+  getWebSearch,
+  getAgentReputation,
 } from "./dataSources.js";
 
 const app = express();
@@ -701,6 +703,35 @@ app.get("/v1/convert/heic-to-png", async (req, res, next) => {
     const { url } = req.query;
     if (!url) return res.status(400).json({ error: "url query param is required" });
     res.json(await cached(`convert:heic-to-png:${url}`, 60, () => getHeicToPng(url)));
+  } catch (err) {
+    next(err);
+  }
+});
+
+// Web search (self-hosted SearXNG). $0.008/call. 30s cache -- search
+// results can shift quickly, and there's no per-call credit cost to
+// protect here, just repeat compute against our own searxng instance --
+// same rationale as render/screenshot's 30s window above.
+app.get("/v1/search/web", async (req, res, next) => {
+  try {
+    const { q, limit } = req.query;
+    if (!q) return res.status(400).json({ error: "q query param is required" });
+    res.json(await cached(`search:web:${q}:${limit || ""}`, 30, () => getWebSearch(q, { limit })));
+  } catch (err) {
+    next(err);
+  }
+});
+
+// ERC-8004 agent reputation lookup. $0.03/call. 120s cache -- on-chain
+// feedback doesn't need to be fresher than a couple minutes for most
+// callers, and this avoids re-running the same handful of eth_calls on
+// every request for a popular agentId.
+app.get("/v1/agent/reputation/:agentId", async (req, res, next) => {
+  try {
+    const { agentId } = req.params;
+    const chain = typeof req.query.chain === "string" ? req.query.chain : undefined;
+    const cacheKey = `agent:reputation:${chain || "eth"}:${agentId}`;
+    res.json(await cached(cacheKey, 120, () => getAgentReputation(agentId, { chain })));
   } catch (err) {
     next(err);
   }

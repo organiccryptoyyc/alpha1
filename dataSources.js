@@ -1625,3 +1625,88 @@ export async function getPuppeteerScreenshot(targetUrl) {
     renderedAt: new Date().toISOString(),
   };
 }
+
+// --- HEIC to PNG conversion --------------------------------------------
+// PATCH (2026-08-15): backs GET /v1/convert/heic-to-png. Straightforward
+// utility conversion -- fetches a caller-supplied HEIC/HEIF image and
+// returns it re-encoded as PNG, base64 in JSON (same response shape as
+// getPuppeteerScreenshot() above, for the same reason: keeps every route
+// on this server returning JSON rather than introducing a second, binary-
+// response code path in server.js).
+//
+// Uses heic-convert (pure JavaScript -- wraps libheif-js, a WASM build of
+// libheif, plus pngjs/jpeg-js for encoding) instead of a native binding
+// like sharp's libvips. No system libraries to apk-install, no separate
+// container needed the way puppeteer-render needed one above -- this runs
+// fine in-process on the existing node:20-alpine image with a single
+// `npm install`.
+//
+// SSRF hardening: reuses the exact same isBlockedTarget() denylist as
+// every other buyer-supplied-URL route in this file.
+import convert from "heic-convert";
+
+// 20MB is generous for a phone photo and bounds memory: an unbounded
+// upstream response decoded straight into memory is a real way to OOM
+// this container, same class of risk flagged for the buyer-supplied-URL
+// routes above (getUprockFetch, getPuppeteerScreenshot).
+const HEIC_MAX_INPUT_BYTES = 20 * 1024 * 1024;
+
+// Minimal, dependency-free PNG dimension reader -- IHDR is always the
+// first chunk; width/height are big-endian uint32s at a fixed offset
+// right after the 8-byte PNG signature + 4-byte chunk length + 4-byte
+// "IHDR" tag. Avoids pulling in a second image library just to report
+// width/height back to the caller.
+function readPngDimensions(buffer) {
+  if (buffer.length < 24) return { width: null, height: null };
+  return {
+    width: buffer.readUInt32BE(16),
+    height: buffer.readUInt32BE(20),
+  };
+}
+
+export async function getHeicToPng(targetUrl) {
+  if (!targetUrl) throw new Error("url query param is required");
+  let parsed;
+  try {
+    parsed = new URL(targetUrl);
+  } catch {
+    throw new Error("url must be a valid absolute URL, e.g. https://example.com/photo.heic");
+  }
+  if (!["http:", "https:"].includes(parsed.protocol)) {
+    throw new Error("url must use http or https");
+  }
+  if (isBlockedTarget(parsed.hostname)) {
+    throw new Error("url must not target a localhost, private, or link-local address");
+  }
+
+  const res = await fetch(parsed.toString());
+  if (!res.ok) {
+    throw new Error(`failed to fetch source image: HTTP ${res.status}`);
+  }
+  const declaredLength = Number(res.headers.get("content-length") || 0);
+  if (declaredLength > HEIC_MAX_INPUT_BYTES) {
+    throw new Error(`source image is too large (${declaredLength} bytes, max ${HEIC_MAX_INPUT_BYTES})`);
+  }
+  const inputBuffer = Buffer.from(await res.arrayBuffer());
+  if (inputBuffer.length > HEIC_MAX_INPUT_BYTES) {
+    throw new Error(`source image is too large (${inputBuffer.length} bytes, max ${HEIC_MAX_INPUT_BYTES})`);
+  }
+
+  let outputBuffer;
+  try {
+    outputBuffer = await convert({ buffer: inputBuffer, format: "PNG" });
+  } catch (err) {
+    throw new Error(`HEIC decode failed: ${err.message}`);
+  }
+
+  const { width, height } = readPngDimensions(outputBuffer);
+
+  return {
+    source: "heic-to-png",
+    url: parsed.toString(),
+    width,
+    height,
+    pngBase64: outputBuffer.toString("base64"),
+    convertedAt: new Date().toISOString(),
+  };
+}

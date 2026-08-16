@@ -1,0 +1,31 @@
+# searxng-settings.yml
+# PATCH (2026-08-16): minimal override mounted into the searxng service
+# (see docker-compose.yml) to back GET /v1/search/web. Inherits every other
+# default from SearXNG's own settings.yml (use_default_settings: true) --
+# this file only changes the two things needed to use SearXNG as a JSON
+# SERP API instead of its default human-facing HTML search page:
+#
+#   1. search.formats: json is OFF by default upstream (only html is on) --
+#      confirmed directly from SearXNG's own docs, not assumed.
+#   2. server.limiter: SearXNG's bot-detection rate limiter is aimed at
+#      public-facing deployments getting scraped/abused. This instance is
+#      internal-only (no port published to the host or the internet -- see
+#      docker-compose.yml), reachable only from onchain-snapshot-api's own
+#      container over the docker network, so there is nothing for the
+#      limiter to protect against here and it would otherwise block our own
+#      JSON requests.
+#
+# server.secret_key below is a fixed placeholder, not a real secret -- it
+# only signs SearXNG's own internal CSRF-style tokens for its (unused, in
+# this deployment) HTML UI, and this instance is never reachable from
+# outside the docker network regardless.
+use_default_settings: true
+
+server:
+  secret_key: "alpha7-searxng-internal-only-not-a-real-secret"
+  limiter: false
+
+search:
+  formats:
+    - html
+    - json

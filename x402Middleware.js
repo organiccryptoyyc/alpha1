@@ -974,6 +974,67 @@ export const routes = {
       },
     }),
   },
+  // Web search, backed by this project's own self-hosted SearXNG instance
+  // (see docker-compose.yml's searxng service / getWebSearch() in
+  // dataSources.js). $0.008/call -- positioned between Exa ($0.004) and
+  // Tavily ($0.01), the two closest live x402-marketplace comparables found
+  // researching this route. No per-call upstream credit cost (self-hosted,
+  // free, keyless) -- same margin story as heic-to-png above.
+  //
+  // Discovery-extension content kept minimal for the same reason as every
+  // route added since the seller-trust root-cause writeup in README.md
+  // (2026-08-15).
+  "GET /v1/search/web": {
+    accepts: multiNetworkAccepts(0.008),
+    description: "Web search via a self-hosted SearXNG instance (title/url/snippet per result).",
+    extensions: declareDiscoveryExtension({
+      input: { q: "pocket network shannon upgrade" },
+      inputSchema: {
+        properties: {
+          q: { type: "string", description: "Search query" },
+        },
+        required: ["q"],
+      },
+      output: {
+        example: { source: "searxng", resultCount: 5 },
+      },
+    }),
+  },
+  // ERC-8004 (Trustless Agents) reputation lookup. $0.03/call -- same
+  // pricing tier as peaq/machine-verify above, the closest architectural
+  // analog (a small number of RPC eth_calls against a known contract, no
+  // external paid API). Registry addresses and ABI confirmed directly from
+  // erc-8004/erc-8004-contracts source, not assumed -- see getAgentReputation()
+  // in dataSources.js. Fills the one trust-score gap none of this server's
+  // other composite routes cover: AI-agent identity/reputation, distinct
+  // from brand-verify (domains), x402-seller-trust (x402 sellers),
+  // pokt-supplier-trust (POKT infra operators), and peaq/machine-verify
+  // (IoT/machine identity).
+  //
+  // Discovery-extension content kept minimal for the same reason as every
+  // route added since the seller-trust root-cause writeup in README.md
+  // (2026-08-15).
+  "GET /v1/agent/reputation/:agentId": {
+    accepts: multiNetworkAccepts(0.03),
+    description: "ERC-8004 on-chain agent identity + aggregated feedback (Ethereum or BSC).",
+    extensions: declareDiscoveryExtension({
+      pathParams: { agentId: "47167" },
+      pathParamsSchema: {
+        properties: {
+          agentId: { type: "string", description: "ERC-8004 agent token ID" },
+        },
+        required: ["agentId"],
+      },
+      queryParams: {
+        properties: {
+          chain: { type: "string", description: "'eth' (default) or 'bsc'" },
+        },
+      },
+      output: {
+        example: { source: "erc8004-agent-reputation", registered: true, feedbackCount: 4 },
+      },
+    }),
+  },
 };
 
 export function buildX402Middleware() {

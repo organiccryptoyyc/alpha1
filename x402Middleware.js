@@ -950,6 +950,30 @@ export const routes = {
       },
     }),
   },
+  // HEIC to PNG conversion. $0.005/call -- pure compute, same pricing tier
+  // as geo/ip above (cheap, boring, high-frequency utility; no upstream
+  // credit cost, and unlike render/screenshot this doesn't even need a
+  // second container -- see getHeicToPng() in dataSources.js).
+  //
+  // Discovery-extension content kept minimal for the same reason as
+  // render/screenshot above -- see the seller-trust root-cause writeup in
+  // README.md (2026-08-15).
+  "GET /v1/convert/heic-to-png": {
+    accepts: multiNetworkAccepts(0.005),
+    description: "Convert a HEIC/HEIF image to PNG (base64-encoded).",
+    extensions: declareDiscoveryExtension({
+      input: { url: "https://example.com/photo.heic" },
+      inputSchema: {
+        properties: {
+          url: { type: "string", description: "Absolute URL to a HEIC/HEIF image (http or https)" },
+        },
+        required: ["url"],
+      },
+      output: {
+        example: { source: "heic-to-png", width: 4032, height: 3024 },
+      },
+    }),
+  },
 };
 
 export function buildX402Middleware() {

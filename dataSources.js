@@ -2143,3 +2143,110 @@ export async function getSolTransactionHistory(addressRaw, { limit: limitRaw } =
     fetchedAt: new Date().toISOString(),
   };
 }
+.toISOString(),
+  };
+}
+
+// --- OFAC sanctions screening (2026-08-16) ---
+//
+// OFAC's own authoritative source is the SDN list, published as
+// sdn_advanced.xml (~80MB, relational schema: names/addresses/documents/
+// digital-currency IDs all in separate linked structures) --
+// https://www.treasury.gov/ofac/downloads/sanctions/1.0/sdn_advanced.xml.
+// Parsing that directly in-process for a lightweight per-address lookup
+// is more than this route needs. Instead this uses the `lists` branch of
+// 0xB10C/ofac-sanctioned-digital-currency-addresses (MIT-licensed, verified
+// directly against its README before building this): a GitHub Actions
+// workflow re-extracts and republishes that exact same OFAC XML nightly at
+// 0 UTC as plain per-asset text files, one address per line. Confirmed live
+// by fetching both files directly -- ETH list is ~90 addresses, SOL list is
+// a single address as of 2026-08-16.
+//
+// Scoped to ETH + Solana only, same "Tier A" scoping discipline as the
+// historical chain-data routes above. The source covers more assets (XBT,
+// LTC, BSC, TRX, ARB, etc.) if this ever needs to expand -- see README.
+const OFAC_LIST_URLS = {
+  ethereum:
+    process.env.OFAC_ETH_LIST_URL ||
+    "https://raw.githubusercontent.com/0xB10C/ofac-sanctioned-digital-currency-addresses/lists/sanctioned_addresses_ETH.txt",
+  solana:
+    process.env.OFAC_SOL_LIST_URL ||
+    "https://raw.githubusercontent.com/0xB10C/ofac-sanctioned-digital-currency-addresses/lists/sanctioned_addresses_SOL.txt",
+};
+// The source regenerates once/night -- this just bounds how stale our own
+// in-process copy can get between regenerations, not a real-time freshness
+// guarantee. Module-level singleton (not the server.js `cached()` helper)
+// because what needs caching here is the whole list, shared across every
+// address lookup, not a per-request key -- the per-address answer itself
+// is a free Set.has() once the list is loaded and is never worth caching
+// on its own.
+const OFAC_LIST_TTL_MS = 6 * 60 * 60 * 1000; // 6h
+let ofacListCache = null; // { fetchedAt, sets: { ethereum: Set, solana: Set } }
+
+async function loadOfacLists() {
+  if (ofacListCache && Date.now() - ofacListCache.fetchedAt < OFAC_LIST_TTL_MS) {
+    return ofacListCache;
+  }
+  const chains = Object.keys(OFAC_LIST_URLS);
+  const texts = await Promise.all(
+    chains.map(async (chain) => {
+      const url = OFAC_LIST_URLS[chain];
+      const res = await fetch(url);
+      if (!res.ok) throw new Error(`OFAC sanctions list fetch failed: HTTP ${res.status} (${chain})`);
+      return res.text();
+    })
+  );
+  const toSet = (text) =>
+    new Set(
+      text
+        .split("\n")
+        .map((line) => line.trim().toLowerCase())
+        .filter(Boolean)
+    );
+  const sets = {};
+  chains.forEach((chain, i) => {
+    sets[chain] = toSet(texts[i]);
+  });
+  ofacListCache = { fetchedAt: Date.now(), sets };
+  return ofacListCache;
+}
+
+function detectAddressChain(address) {
+  if (/^0x[a-fA-F0-9]{40}$/.test(address)) return "ethereum";
+  if (/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(address)) return "solana";
+  return null;
+}
+
+export async function getSanctionsCheck(addressRaw, { chain: chainRaw } = {}) {
+  const address = String(addressRaw || "").trim();
+  if (!address) throw new Error("address is required");
+
+  const chain = chainRaw ? String(chainRaw).trim().toLowerCase() : detectAddressChain(address);
+  if (chain !== "ethereum" && chain !== "solana") {
+    throw new Error(
+      "could not determine chain from address format -- pass chain=ethereum or chain=solana explicitly, or supply a 0x-prefixed Ethereum address or a base58 Solana address"
+    );
+  }
+  if (chain === "ethereum" && !/^0x[a-fA-F0-9]{40}$/.test(address)) {
+    throw new Error("address must be a 0x-prefixed 20-byte Ethereum address");
+  }
+  if (chain === "solana" && !/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(address)) {
+    throw new Error("address must be a base58 Solana address");
+  }
+
+  const { sets, fetchedAt } = await loadOfacLists();
+  const sanctioned = sets[chain].has(address.toLowerCase());
+
+  return {
+    source: "ofac-sanctions-check",
+    chain,
+    address,
+    sanctioned,
+    matchType: sanctioned ? "direct-sdn-list-match" : null,
+    list: "OFAC Specially Designated Nationals (SDN) List -- digital currency addresses",
+    listSourceUrl: OFAC_LIST_URLS[chain],
+    listSyncedAt: new Date(fetchedAt).toISOString(),
+    note: "direct address match against OFAC's published SDN list only -- does not perform multi-hop / indirect-exposure clustering, so funds that passed through a sanctioned address via an intermediary wallet will not be flagged here; not a substitute for a full compliance screening program",
+    fetchedAt: new Date().toISOString(),
+  };
+}

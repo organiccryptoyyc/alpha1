@@ -44,6 +44,8 @@ import {
   getHeicToPng,
   getWebSearch,
   getAgentReputation,
+  getEthLogs,
+  getSolTransactionHistory,
 } from "./dataSources.js";
 
 const app = express();
@@ -732,6 +734,35 @@ app.get("/v1/agent/reputation/:agentId", async (req, res, next) => {
     const chain = typeof req.query.chain === "string" ? req.query.chain : undefined;
     const cacheKey = `agent:reputation:${chain || "eth"}:${agentId}`;
     res.json(await cached(cacheKey, 120, () => getAgentReputation(agentId, { chain })));
+  } catch (err) {
+    next(err);
+  }
+});
+
+// Tier A historical/indexed chain data (2026-08-16). $0.012/call. 15s cache
+// -- roughly one ETH block's worth of staleness tolerance, matching the
+// eth:block route's own 8s TTL in spirit (a bit looser here since this is a
+// range query, not a single latest-block read).
+app.get("/v1/eth/logs", async (req, res, next) => {
+  try {
+    const { address, topic0, blocks } = req.query;
+    if (!address) return res.status(400).json({ error: "address query param is required" });
+    const cacheKey = `eth:logs:${address}:${topic0 || ""}:${blocks || ""}`;
+    res.json(await cached(cacheKey, 15, () => getEthLogs(address, { topic0, blocks })));
+  } catch (err) {
+    next(err);
+  }
+});
+
+// Tier A historical/indexed chain data (2026-08-16). $0.01/call. 20s cache --
+// polling a "most recent N transactions" view more often than that rarely
+// surfaces anything new.
+app.get("/v1/sol/history/:address", async (req, res, next) => {
+  try {
+    const { address } = req.params;
+    const { limit } = req.query;
+    const cacheKey = `sol:history:${address}:${limit || ""}`;
+    res.json(await cached(cacheKey, 20, () => getSolTransactionHistory(address, { limit })));
   } catch (err) {
     next(err);
   }

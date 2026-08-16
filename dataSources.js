@@ -1993,6 +1993,53 @@ function toBlockHex(n) {
   return "0x" + Math.max(0, Math.trunc(n)).toString(16);
 }
 
+// INCIDENT (2026-08-16, live-test follow-up): the block-range clamp above
+// is not enough on its own. First live test against a real high-traffic
+// contract (USDC) failed even at a 1000-block window:
+//   RPC eth_getLogs error: query exceeds max results 20000, retry with the
+//   range 25768071-25768348
+// llamarpc enforces a RESULT-COUNT ceiling (20,000 logs) independent of
+// block range -- a busy-enough contract can blow past that in far fewer
+// than 1000 blocks (this error's own suggested retry range was ~277
+// blocks). No fixed block-count cap can fully solve this: an even busier
+// contract could exceed 20k logs in 10 blocks. Fix: catch this specific
+// rejection and narrow the range instead of failing outright. llamarpc's
+// error conveniently names an exact working range -- use it directly when
+// present; fall back to halving the window (bounded attempts) for
+// providers/errors that don't.
+const ETH_LOGS_RETRY_RANGE_REGEX = /retry with the range[:\s]*(\d+)\s*-\s*(\d+)/i;
+const ETH_LOGS_MAX_NARROW_ATTEMPTS = 5;
+const ETH_LOGS_MIN_RANGE = 10; // give up narrowing below this -- contract is too hot for this endpoint right now
+
+async function fetchEthLogsWithNarrowing(baseFilter, fromBlock, toBlock) {
+  let attemptFrom = fromBlock;
+  let attemptTo = toBlock;
+  let lastErr;
+  for (let attempt = 0; attempt < ETH_LOGS_MAX_NARROW_ATTEMPTS; attempt++) {
+    try {
+      const filter = { ...baseFilter, fromBlock: toBlockHex(attemptFrom), toBlock: toBlockHex(attemptTo) };
+      const logs = await rpcCall(ETH_RPC_URL, "eth_getLogs", [filter]);
+      return { logs, fromBlock: attemptFrom, toBlock: attemptTo };
+    } catch (err) {
+      lastErr = err;
+      const match = err.message.match(ETH_LOGS_RETRY_RANGE_REGEX);
+      const suggestedFrom = match ? parseInt(match[1], 10) : NaN;
+      const suggestedTo = match ? parseInt(match[2], 10) : NaN;
+      if (Number.isFinite(suggestedFrom) && Number.isFinite(suggestedTo) && suggestedTo > suggestedFrom) {
+        attemptFrom = suggestedFrom;
+        attemptTo = suggestedTo;
+        continue;
+      }
+      // No usable suggested range (or the suggestion itself later failed) --
+      // halve the window, anchored to the same toBlock, and try again.
+      const span = attemptTo - attemptFrom;
+      if (span <= ETH_LOGS_MIN_RANGE) break;
+      attemptFrom = attemptTo - Math.floor(span / 2);
+    }
+  }
+  throw lastErr;
+}
+
 export async function getEthLogs(addressRaw, { topic0: topic0Raw, blocks: blocksRaw } = {}) {
   const address = String(addressRaw || "").trim();
   if (!/^0x[a-fA-F0-9]{40}$/.test(address)) {
@@ -2017,14 +2064,16 @@ export async function getEthLogs(addressRaw, { topic0: topic0Raw, blocks: blocks
   const latest = parseInt(latestHex, 16);
   const fromBlock = Math.max(0, latest - blocksSearched);
 
-  const filter = {
-    address,
-    fromBlock: toBlockHex(fromBlock),
-    toBlock: toBlockHex(latest),
-  };
-  if (topic0) filter.topics = [topic0];
+  const baseFilter = { address };
+  if (topic0) baseFilter.topics = [topic0];
 
-  const rawLogs = await rpcCall(ETH_RPC_URL, "eth_getLogs", [filter]);
+  const { logs: rawLogs, fromBlock: actualFromBlock, toBlock: actualToBlock } = await fetchEthLogsWithNarrowing(
+    baseFilter,
+    fromBlock,
+    latest
+  );
+  const narrowedDueToActivity = actualFromBlock !== fromBlock || actualToBlock !== latest;
+
   const truncated = rawLogs.length > ETH_LOGS_MAX_RESULTS;
   const logs = rawLogs.slice(0, ETH_LOGS_MAX_RESULTS).map((l) => ({
     address: l.address,
@@ -2041,13 +2090,17 @@ export async function getEthLogs(addressRaw, { topic0: topic0Raw, blocks: blocks
     chain: "ethereum",
     address,
     topic0: topic0 || null,
-    fromBlock,
-    toBlock: latest,
-    blocksSearched: latest - fromBlock,
+    fromBlock: actualFromBlock,
+    toBlock: actualToBlock,
+    blocksSearched: actualToBlock - actualFromBlock,
+    blocksRequested: blocksSearched,
+    narrowedDueToActivity,
     logCount: logs.length,
     truncated,
     logs,
-    note: `bounded to the most recent ${ETH_LOGS_MAX_BLOCKS} blocks -- recent history only, not a full-archive query`,
+    note: narrowedDueToActivity
+      ? `contract activity was too high for the requested ${blocksSearched}-block window -- automatically narrowed to ${actualToBlock - actualFromBlock} blocks to stay under the RPC provider's result-count ceiling; recent history only, not a full-archive query`
+      : `bounded to the most recent ${ETH_LOGS_MAX_BLOCKS} blocks -- recent history only, not a full-archive query`,
     fetchedAt: new Date().toISOString(),
   };
 }

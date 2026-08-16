@@ -1081,6 +1081,27 @@ export const routes = {
       },
     }),
   },
+  "GET /v1/compliance/sanctions-check/:address": {
+    accepts: multiNetworkAccepts(0.015),
+    description: "Screens a wallet address against OFAC's published SDN sanctions list (direct match only, Ethereum or Solana).",
+    extensions: declareDiscoveryExtension({
+      pathParams: { address: "0x8576acc5c05d6ce88f4e49bf65bdf0c62f91353c" },
+      pathParamsSchema: {
+        properties: {
+          address: { type: "string", description: "Ethereum (0x...) or Solana (base58) address to screen" },
+        },
+        required: ["address"],
+      },
+      queryParams: {
+        properties: {
+          chain: { type: "string", description: "Optional: 'ethereum' or 'solana' -- overrides auto-detection from address format" },
+        },
+      },
+      output: {
+        example: { source: "ofac-sanctions-check", sanctioned: false },
+      },
+    }),
+  },
 };
 
 export function buildX402Middleware() {

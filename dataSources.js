@@ -1971,3 +1971,122 @@ export async function getAgentReputation(agentIdRaw, { chain = "eth" } = {}) {
     fetchedAt: new Date().toISOString(),
   };
 }
+
+// --- Tier A historical/indexed chain data (2026-08-16) ----------------------
+// "Tier A" = zero new dependencies, zero new containers, zero new env vars --
+// reuses the exact same ETH_RPC_URL / SOL_RPC_URL already wired up above.
+// Scoped to ETH + Solana only for this round (BSC and peaq deferred -- their
+// free-tier indexer/API situations are unverified, see README). Both routes
+// are deliberately bounded to "recent" history, not full-archive: public RPC
+// providers reject eth_getLogs queries over some undocumented block-range
+// ceiling (varies 100-100,000 blocks by provider, no way to know llamarpc's
+// specific number without hitting it in production), and getSignaturesForAddress
+// has a hard 1000-signature ceiling built into the Solana RPC spec itself.
+// Rather than guess a provider's exact limit, both routes clamp their own
+// request to a conservative worst-case-safe size server-side, so a caller
+// can never accidentally trigger a provider-side rejection.
+
+const ETH_LOGS_MAX_BLOCKS = 1000; // conservative floor seen across providers
+const ETH_LOGS_MAX_RESULTS = 500; // cap the response payload, not just the range
+
+function toBlockHex(n) {
+  return "0x" + Math.max(0, Math.trunc(n)).toString(16);
+}
+
+export async function getEthLogs(addressRaw, { topic0: topic0Raw, blocks: blocksRaw } = {}) {
+  const address = String(addressRaw || "").trim();
+  if (!/^0x[a-fA-F0-9]{40}$/.test(address)) {
+    throw new Error("address must be a 0x-prefixed 20-byte Ethereum address");
+  }
+
+  let topic0;
+  if (topic0Raw !== undefined && topic0Raw !== null && String(topic0Raw).trim() !== "") {
+    topic0 = String(topic0Raw).trim();
+    if (!/^0x[a-fA-F0-9]{64}$/.test(topic0)) {
+      throw new Error("topic0 must be a 0x-prefixed 32-byte event signature hash");
+    }
+  }
+
+  // Always clamp, never reject -- a caller asking for 50000 blocks just gets
+  // the max safe window back rather than an error, same "forgiving input"
+  // posture as getWebSearch's limit clamping above.
+  const blocksRequested = Number(blocksRaw) || 500;
+  const blocksSearched = Math.max(1, Math.min(Math.trunc(blocksRequested), ETH_LOGS_MAX_BLOCKS));
+
+  const latestHex = await rpcCall(ETH_RPC_URL, "eth_blockNumber");
+  const latest = parseInt(latestHex, 16);
+  const fromBlock = Math.max(0, latest - blocksSearched);
+
+  const filter = {
+    address,
+    fromBlock: toBlockHex(fromBlock),
+    toBlock: toBlockHex(latest),
+  };
+  if (topic0) filter.topics = [topic0];
+
+  const rawLogs = await rpcCall(ETH_RPC_URL, "eth_getLogs", [filter]);
+  const truncated = rawLogs.length > ETH_LOGS_MAX_RESULTS;
+  const logs = rawLogs.slice(0, ETH_LOGS_MAX_RESULTS).map((l) => ({
+    address: l.address,
+    topics: l.topics,
+    data: l.data,
+    blockNumber: parseInt(l.blockNumber, 16),
+    transactionHash: l.transactionHash,
+    logIndex: parseInt(l.logIndex, 16),
+    removed: !!l.removed,
+  }));
+
+  return {
+    source: "eth-logs",
+    chain: "ethereum",
+    address,
+    topic0: topic0 || null,
+    fromBlock,
+    toBlock: latest,
+    blocksSearched: latest - fromBlock,
+    logCount: logs.length,
+    truncated,
+    logs,
+    note: `bounded to the most recent ${ETH_LOGS_MAX_BLOCKS} blocks -- recent history only, not a full-archive query`,
+    fetchedAt: new Date().toISOString(),
+  };
+}
+
+const SOL_HISTORY_MAX_LIMIT = 100; // native API allows up to 1000; kept far
+// smaller here since payload size scales linearly and this is priced/cached
+// as a "recent activity" product, not a bulk-export one.
+
+export async function getSolTransactionHistory(addressRaw, { limit: limitRaw } = {}) {
+  const address = String(addressRaw || "").trim();
+  // Loose base58 shape check only -- same light-validation posture as the
+  // existing getSolBalance() above, which does no format check at all and
+  // just lets a malformed address surface the RPC's own error. This adds a
+  // clearer error message for the most common mistake (wrong chain's address
+  // format) without trying to fully validate base58/curve-point validity.
+  if (!/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(address)) {
+    throw new Error("address must be a base58 Solana address");
+  }
+
+  const limit = Math.max(1, Math.min(Math.trunc(Number(limitRaw) || 20), SOL_HISTORY_MAX_LIMIT));
+
+  const raw = await rpcCall(SOL_RPC_URL, "getSignaturesForAddress", [address, { limit }]);
+  const transactions = (Array.isArray(raw) ? raw : []).map((t) => ({
+    signature: t.signature,
+    slot: t.slot,
+    blockTime: t.blockTime ?? null,
+    confirmationStatus: t.confirmationStatus ?? null,
+    err: t.err !== null && t.err !== undefined,
+    memo: t.memo ?? null,
+  }));
+
+  return {
+    source: "sol-history",
+    chain: "solana",
+    address,
+    limit,
+    count: transactions.length,
+    transactions,
+    note: "most recent transactions only -- not full history since genesis",
+    fetchedAt: new Date().toISOString(),
+  };
+}

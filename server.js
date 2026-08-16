@@ -46,6 +46,7 @@ import {
   getAgentReputation,
   getEthLogs,
   getSolTransactionHistory,
+  getSanctionsCheck,
 } from "./dataSources.js";
 
 const app = express();
@@ -763,6 +764,22 @@ app.get("/v1/sol/history/:address", async (req, res, next) => {
     const { limit } = req.query;
     const cacheKey = `sol:history:${address}:${limit || ""}`;
     res.json(await cached(cacheKey, 20, () => getSolTransactionHistory(address, { limit })));
+  } catch (err) {
+    next(err);
+  }
+});
+
+// OFAC sanctions screening (2026-08-16). $0.015/call. The underlying SDN
+// address list is cached in-process by dataSources.js itself (6h TTL, see
+// loadOfacLists()) since it's shared across every address lookup rather
+// than being per-request cacheable the way the cached() calls above are --
+// once the list is loaded, a per-address answer is a free Set.has() and
+// isn't worth caching again on top of that.
+app.get("/v1/compliance/sanctions-check/:address", async (req, res, next) => {
+  try {
+    const { address } = req.params;
+    const { chain } = req.query;
+    res.json(await getSanctionsCheck(address, { chain }));
   } catch (err) {
     next(err);
   }

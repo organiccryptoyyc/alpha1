@@ -482,6 +482,112 @@ path.
 **Status as of this write-up:** built, pushed, and syntax-checked --
 NOT yet live-tested against a real payment.
 
+## Historical/indexed chain data: Tier A (2026-08-16)
+
+Added two routes answering the "historical/indexed chain data" gap flagged
+as recommendation #2 in the agentic-marketplace gap analysis (2026-08-15):
+`GET /v1/eth/logs` and `GET /v1/sol/history/:address`. Both are a step up
+from every existing chain route on this server, which are all single-value
+snapshots (gas price, latest block, balance) -- these two answer a *range*
+query instead.
+
+**"Tier A" vs "Tier B."** Two architectures were researched for this gap:
+a zero-dependency bounded pass-through against RPC infra this project
+already has (Tier A, built here), and paid-free-tier indexed APIs like
+Etherscan V2 (multichain `eth_getLogs`/`eth_getTransactionsByAddress`) and
+Helius (Solana, genesis-to-now history) that need a signup and an API key
+(Tier B, deferred -- see below). Tier A ships first because it needs zero
+new dependencies, zero new containers, and zero new env vars: both routes
+reuse the exact same `ETH_RPC_URL`/`SOL_RPC_URL` already wired up for the
+snapshot routes above. That also made this the lowest-risk build round on
+this project to date -- no new bind mount, no new Docker image, nothing
+that could repeat the searxng crash-loop incident two sections up.
+
+**Scoped to ETH + Solana only.** BSC and peaq were deliberately left out
+of this round. BSC's raw `eth_getLogs` block-range limit isn't documented
+anywhere reliable, and peaq has no confirmed indexed-data surface at all
+(its only real option, Subscan, speaks a Substrate extrinsics/events
+model -- structurally different from every other EVM route on this
+server, not a drop-in). Revisiting both is future work, not ruled out.
+
+**`GET /v1/eth/logs`** (`?address=...&topic0=...&blocks=...`) wraps
+`eth_getLogs`. Public RPC providers reject queries over some
+undocumented per-provider block-range ceiling -- real-world limits found
+during research ranged from as low as ~1,000 blocks to 100,000 blocks
+depending on provider, and this project's default endpoint
+(`eth.llamarpc.com`) doesn't publish its own number anywhere checked.
+Rather than guess and risk a live rejection in production, the route
+computes its own range server-side (anchored to the current latest block,
+never a caller-supplied `fromBlock`/`toBlock`) and hard-clamps it to 1,000
+blocks regardless of what a caller asks for -- so a request for 50,000
+blocks silently gets the max safe window back instead of an upstream
+error. Results are also capped at 500 logs (`truncated: true` if a query
+matched more) so one call against a high-traffic contract can't return an
+unbounded payload. The response is explicit that this is "recent history,
+not full-archive."
+
+**`GET /v1/sol/history/:address`** (`?limit=...`) wraps
+`getSignaturesForAddress`. Unlike `eth_getLogs`, this one has a hard,
+documented ceiling built into the Solana RPC spec itself: max 1,000
+signatures per call. This route defaults to 20 and clamps to a max of
+100 (well under the spec ceiling, since response payload size scales
+linearly with `limit` and this is priced/cached as a "recent activity"
+check, not a bulk export). Each signature comes back with its slot,
+block time, confirmation status, and error flag -- everything
+`getSignaturesForAddress` already returns -- with no follow-up
+`getTransaction` call per signature, keeping this a single RPC round
+trip per request, same shape as every other route in this file.
+
+**Pricing:** `/v1/eth/logs` at $0.012/call, `/v1/sol/history/:address` at
+$0.01/call -- both above the $0.005 single-value-snapshot tier (a range
+query does more work than a single read), and below the $0.03
+composite-trust-score tier (no aggregation/scoring logic, just a bounded
+pass-through). The ETH route is priced slightly higher than the Solana
+one to reflect its extra `eth_blockNumber` call (two RPC round trips vs.
+one).
+
+**Discovery-extension content kept minimal**, same discipline as every
+route added since the seller-trust root-cause writeup. `/v1/sol/history`'s
+example address is Solana's own USDC mint
+(`EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v`) -- a real, well-known,
+high-activity address, chosen so the example is actually testable.
+
+### Deferred: Tier B (indexed APIs, not built this round)
+
+Noted here for future review, per the decision to ship Tier A first:
+
+- **Etherscan V2** -- one free API key now covers 50+ EVM chains
+  (including Ethereum and BSC) via a `chainid` parameter, with no
+  meaningful block-range ceiling on `getLogs` the way raw RPC has. Free
+  tier is 5 req/sec shared across all chains. BSCScan's standalone API is
+  deprecated in favor of this. **Open question:** some sources describe
+  free-tier chain coverage as "90%, not universal" -- BSC's specific
+  free-tier status wasn't independently confirmed and needs a live check
+  (a real signup + a real call) before it's added to any route.
+- **Helius** (Solana) -- has a purpose-built historical-data product that
+  can return an address's full history since genesis, not just a recent
+  window, which is a strictly stronger answer to "historical Solana data"
+  than this round's `getSignaturesForAddress` wrapper. Free tier
+  available. The most direct, least-caveated option of everything
+  researched -- the natural first Tier B candidate if/when API keys get
+  provisioned.
+- **peaq** -- no confirmed mainnet Blockscout/EVM-explorer instance was
+  found (`scout.agung.peaq.network` is the Agung *testnet* only). The
+  only real indexed-data option is Subscan, which speaks a Substrate
+  extrinsics/events model, not `eth_getLogs` -- not a drop-in alongside
+  this project's other EVM routes. Needs its own design pass, not just an
+  API key.
+- **BSC** (Tier A) -- could still get its own bounded `eth_getLogs` route
+  later using the same pattern as `/v1/eth/logs` above, once
+  `BSC_RPC_URL`'s real block-range ceiling is confirmed live rather than
+  assumed.
+
+Building any of these means: signing up for a real API key, confirming
+free-tier limits live (not from documentation alone -- this project's
+established discipline after the ERC-8004 registry-address and peaq
+asset-name lessons), and adding the new env var(s) to `docker-compose.yml`
+following the same graceful-no-op-if-unset pattern as `UPROCK_API_KEY`.
+
 ## Routes and pricing
 
 | Route | Price | What it returns |

@@ -855,6 +855,16 @@ const VERIFY_DEFAULT_TIMEOUT_SEC = 30;
 // every second for a job that reliably takes 15-30s per region.
 const VERIFY_MAX_WAIT_MS = 45000;
 const VERIFY_POLL_MS = 2000;
+// Backoff (2026-08-17): UpRock flagged that this account was averaging ~21
+// status reads per sweep job -- a fixed 2s interval over a 45s ceiling maxes
+// out at ~22 reads. Reads don't cost credits, but they're a rate-limit
+// surface that will get hit before job-volume/credit limits do at real
+// production traffic. Growing the interval (capped) keeps the same early
+// responsiveness -- most sweeps finish in UpRock's own quoted 15-30s window,
+// well before the backoff has grown much -- while roughly halving the
+// worst-case read count for anything that runs closer to the full ceiling.
+const VERIFY_POLL_BACKOFF_FACTOR = 1.3;
+const VERIFY_POLL_MAX_MS = 6000;
 
 async function uprockSweepCreate({ url, regions, triesPerRegion, timeoutSec, apiKey }) {
   return uprockRequest(
@@ -885,6 +895,7 @@ async function uprockSweepStatus(sweepId, apiKey) {
 async function pollSweepUntilDone(sweepId, apiKey, { maxWaitMs = VERIFY_MAX_WAIT_MS, pollMs = VERIFY_POLL_MS } = {}) {
   const deadline = Date.now() + maxWaitMs;
   let last = await uprockSweepStatus(sweepId, apiKey);
+  let interval = pollMs;
 
   while (Date.now() < deadline) {
     const regionStatuses = Object.values(last.results || {}).map((r) => r.status);
@@ -894,7 +905,8 @@ async function pollSweepUntilDone(sweepId, apiKey, { maxWaitMs = VERIFY_MAX_WAIT
     if (allTerminal || last.status === "completed" || last.status === "failed") {
       return { ...last, timedOut: false };
     }
-    await new Promise((r) => setTimeout(r, pollMs));
+    await new Promise((r) => setTimeout(r, interval));
+    interval = Math.min(interval * VERIFY_POLL_BACKOFF_FACTOR, VERIFY_POLL_MAX_MS);
     last = await uprockSweepStatus(sweepId, apiKey);
   }
 

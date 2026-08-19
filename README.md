@@ -650,6 +650,36 @@ source URLs be overridden without a code change, same pattern as every
 other externally-sourced URL in this file, but both have working
 defaults baked in).
 
+## UpRock sweep-poll backoff (2026-08-17)
+
+Small operational fix, not a new route. UpRock flagged (unprompted, while
+answering pricing questions this project asked) that this account's Sweep
+jobs were averaging ~21 status-poll reads each -- a byproduct of
+`pollSweepUntilDone()` in `dataSources.js` polling the sweep-status
+endpoint at a flat 2-second interval against a 45-second ceiling (up to
+~22 reads worst case). Reads don't cost credits, but they're a
+rate-limit surface independent of job volume/credit limits, and worth
+fixing before real production traffic hits `/v1/uprock/verify/:domain`.
+
+**Fix:** the poll interval now grows (`VERIFY_POLL_BACKOFF_FACTOR = 1.3`)
+from the same 2-second starting point up to a 6-second cap
+(`VERIFY_POLL_MAX_MS`), instead of holding flat. Sweeps that finish
+quickly -- UpRock's own quoted 15-30s window covers most of them -- see
+essentially the same responsiveness as before, since the interval barely
+grows in that window. Sweeps that run closer to the full 45-second
+ceiling see roughly half the total reads (~10 instead of ~22).
+
+**Pricing sanity check, while on the subject.** UpRock also confirmed
+Sweep bills 3 credits/job linearly (no bundle discount at 3 regions) and
+Crawl bills 1 credit/job. At their new Pro ($20/10k credits) and
+Business ($99/100k credits) tiers, that works out to roughly $0.006 and
+$0.003 per Sweep respectively in underlying cost, against this project's
+$0.15/call price for `/v1/uprock/verify/:domain` -- a wide margin, not a
+mispriced route.
+
+Zero new dependencies, zero new env vars, zero route/pricing changes --
+purely an internal polling-behavior fix.
+
 ## Routes and pricing
 
 | Route | Price | What it returns |

@@ -42,12 +42,12 @@ operator:
   currencies:
     usd: ['USDC']
   network: mainnet
-  recipient: '${PAY_TO_ADDRESS_RECIPIENT}'
+  recipient: 'HYhhZ1gH4bKLGFnbnE3RukQ1s1G7fz9cTcuHiV1Zymje'
 
 env:
-  UPSTREAM_URL: 'https://YOUR-ALPHA7-DOMAIN.example.com'
+  UPSTREAM_URL: 'https://organiccryptoyyc.com:8443'
   PAYSH_INTERNAL_KEY: '${PAYSH_INTERNAL_KEY}'
-  PAY_TO_ADDRESS_RECIPIENT: '${PAY_TO_ADDRESS_RECIPIENT}'
+  PAY_TO_ADDRESS_RECIPIENT: 'HYhhZ1gH4bKLGFnbnE3RukQ1s1G7fz9cTcuHiV1Zymje'
 
 endpoints:
   - method: GET

@@ -1,0 +1,18 @@
+# Dockerfile for pay.sh's own payment gateway (pay gate api) -- deployed
+# SEPARATELY from Alpha7 itself (Vercel or Cloud Run, not this repo's Umbrel
+# stack). See paysh-provider.yml for the provider spec this references, and
+# https://pay.sh/docs/building-with-pay/deployment/vercel for the full
+# deployment guide.
+#
+# Vercel project setup: leave the project root at this repo's root (this
+# file and paysh-provider.yml both live here, not in a deploy/ subfolder),
+# select the Container preset, and set the six env vars documented in
+# paysh-provider.yml's header comment before the first deploy.
+
+ARG PAY_IMAGE=ghcr.io/solana-foundation/pay:latest
+FROM ${PAY_IMAGE}
+
+WORKDIR /app
+COPY paysh-provider.yml /app/paysh-provider.yml
+
+CMD ["gate", "api", "/app/paysh-provider.yml", "--openapi", "https://organiccryptoyyc.com:8443/openapi.json"]

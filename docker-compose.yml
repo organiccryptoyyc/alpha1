@@ -96,6 +96,14 @@ services:
       # -- that's fail-closed by design, not a bug, see allowlist.js.
       ALLOWLIST_MODE: ${ALLOWLIST_MODE}
       ALLOWLIST_KEYS: ${ALLOWLIST_KEYS}
+      # PATCH (2026-08-19): shared secret gating the /internal/paysh/*
+      # routes (see server.js) -- pay.sh's own gateway proxies to those
+      # paths post-payment, injecting this value as X-Internal-Key via
+      # provider.yml's routing.auth block. Required: unset means those
+      # routes 503 rather than silently serving for free. Generate any
+      # long random string; it never needs to be shared with anyone but
+      # pay.sh's own deployed gateway config.
+      PAYSH_INTERNAL_KEY: ${PAYSH_INTERNAL_KEY}
       # PATCH (2026-08-15): headless-Chrome render service backing
       # GET /v1/render/screenshot -- see puppeteer-render.js for the full
       # "why a separate container" rationale. Internal-only, reached by

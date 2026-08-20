@@ -14,6 +14,16 @@
 #   2. Generate a value for PAYSH_INTERNAL_KEY, set it in BOTH Alpha7's
 #      Portainer stack env vars AND wherever this gateway's env vars live
 #      (Vercel/Cloud Run secrets) -- they must match exactly.
+#   2b. This gateway needs its own operator signer -- a Solana keypair that
+#      co-signs as fee-payer and is DIFFERENT from the recipient address
+#      above (recipient just receives funds; the signer actively operates
+#      the gateway and needs a small amount of real SOL for network fees).
+#      Generate one on your own machine (e.g. `solana-keygen new --outfile
+#      paysh-operator.json`), fund it with ~0.05 SOL, and set its contents
+#      as the PAY_OPERATOR_KEYPAIR env var in Vercel -- never commit this
+#      file to git. Also generate PAY_MPP_CHALLENGE_SECRET once via
+#      `openssl rand -hex 32` and set PAY_RPC_URL to a Solana mainnet RPC
+#      endpoint (a free public one works to start).
 #   3. Set PAY_TO_ADDRESS_RECIPIENT below (or in the deploy platform's env)
 #      to the same Solana wallet Alpha7's other x402 routes already pay out
 #      to -- no new wallet needed, this just adds a second income stream
@@ -42,7 +52,13 @@ operator:
   currencies:
     usd: ['USDC']
   network: mainnet
+  fee_payer: true
+  rpc_url: '${PAY_RPC_URL}'
   recipient: 'HYhhZ1gH4bKLGFnbnE3RukQ1s1G7fz9cTcuHiV1Zymje'
+  challenge_binding_secret: '${PAY_MPP_CHALLENGE_SECRET}'
+  signer:
+    backend: env
+    value_from_env: PAY_OPERATOR_KEYPAIR
 
 env:
   UPSTREAM_URL: 'https://organiccryptoyyc.com:8443'

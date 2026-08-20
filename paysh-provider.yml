@@ -1,0 +1,161 @@
+# pay.sh provider spec for Alpha7's differentiated data routes.
+#
+# This is NOT part of Alpha7 itself -- it's config for pay.sh's own gateway
+# (`pay gate api`), a separate process you deploy on pay.sh's recommended
+# infrastructure (Vercel or GCP Cloud Run; see
+# https://pay.sh/docs/building-with-pay/deployment/overview). That gateway
+# does its own 402 handshake using pay.sh's rails, then -- per `routing`
+# below -- proxies the already-paid request to Alpha7's `/internal/paysh/*`
+# routes (see server.js and the README's "pay.sh listing" section for why
+# those exist instead of the public /v1/* routes).
+#
+# Before deploying:
+#   1. Replace UPSTREAM_URL below with Alpha7's real public base URL.
+#   2. Generate a value for PAYSH_INTERNAL_KEY, set it in BOTH Alpha7's
+#      Portainer stack env vars AND wherever this gateway's env vars live
+#      (Vercel/Cloud Run secrets) -- they must match exactly.
+#   3. Set PAY_TO_ADDRESS_RECIPIENT below (or in the deploy platform's env)
+#      to the same Solana wallet Alpha7's other x402 routes already pay out
+#      to -- no new wallet needed, this just adds a second income stream
+#      into the same address.
+#   4. `pay --sandbox server start paysh-provider.yml` locally first to
+#      validate the spec before a real deploy.
+#   5. Once deployed and reachable, submit the gateway's live URL through
+#      pay.sh's "List your API" form (https://pay.sh -> For API providers).
+
+name: alpha7-data
+subdomain: alpha7-data
+title: 'Alpha7 On-Chain & Trust Data'
+description: 'Live Pocket Network (Shannon), peaq machine trust, OFAC screening, and x402/domain trust scores -- no API key, pay per call on Solana.'
+category: finance
+version: v1
+
+routing:
+  type: proxy
+  url: '${UPSTREAM_URL}'
+  auth:
+    method: header
+    key: 'X-Internal-Key'
+    value_from_env: PAYSH_INTERNAL_KEY
+
+operator:
+  currencies:
+    usd: ['USDC']
+  network: mainnet
+  recipient: '${PAY_TO_ADDRESS_RECIPIENT}'
+
+env:
+  UPSTREAM_URL: 'https://YOUR-ALPHA7-DOMAIN.example.com'
+  PAYSH_INTERNAL_KEY: '${PAYSH_INTERNAL_KEY}'
+  PAY_TO_ADDRESS_RECIPIENT: '${PAY_TO_ADDRESS_RECIPIENT}'
+
+endpoints:
+  - method: GET
+    path: 'internal/paysh/v1/pokt/service-demand'
+    description: 'Live Pocket Network (Shannon) relay-demand ranking: which services/chains are seeing the most relay volume right now, trend vs. prior EMA, active supplier count per service.'
+    metering:
+      dimensions:
+        - direction: usage
+          unit: requests
+          scale: 1
+          tiers:
+            - price_usd: 0.03
+
+  - method: GET
+    path: 'internal/paysh/v1/pokt/suppliers'
+    description: 'Pocket Network (Shannon) supplier landscape: active supplier count, total POKT staked network-wide, top staked operators.'
+    metering:
+      dimensions:
+        - direction: usage
+          unit: requests
+          scale: 1
+          tiers:
+            - price_usd: 0.02
+
+  - method: GET
+    path: 'internal/paysh/v1/pokt/applications'
+    description: 'Pocket Network (Shannon) application (demand-side) stake feed: active application count, total POKT staked to consume relays, top-staked applications.'
+    metering:
+      dimensions:
+        - direction: usage
+          unit: requests
+          scale: 1
+          tiers:
+            - price_usd: 0.02
+
+  - method: GET
+    path: 'internal/paysh/v1/pokt/tokenomics'
+    description: 'Live Pocket Network (Shannon) tokenomics: PIP-41 mint ratio, burn-equals-mint settlement split, compute-units-to-tokens multiplier.'
+    metering:
+      dimensions:
+        - direction: usage
+          unit: requests
+          scale: 1
+          tiers:
+            - price_usd: 0.02
+
+  - method: GET
+    path: 'internal/paysh/v1/pokt/throughput'
+    description: 'Pocket Network (Shannon) throughput-by-service leaderboard: all-time cumulative claimed relay and compute-unit volume.'
+    metering:
+      dimensions:
+        - direction: usage
+          unit: requests
+          scale: 1
+          tiers:
+            - price_usd: 0.03
+
+  - method: GET
+    path: 'internal/paysh/v1/pokt/validators'
+    description: 'Pocket Network (Shannon) validator security/decentralization feed: bonded validator count, total POKT bonded, per-validator stake, commission, jailed status.'
+    metering:
+      dimensions:
+        - direction: usage
+          unit: requests
+          scale: 1
+          tiers:
+            - price_usd: 0.03
+
+  - method: GET
+    path: 'internal/paysh/v1/peaq/machine-verify/{idOrAddress}'
+    description: 'Trust/verification check for a peaq network machine: credit rating (MCR), bond status, negative-flag status, on-chain event history. Sourced live from peaq public MCR API.'
+    metering:
+      dimensions:
+        - direction: usage
+          unit: requests
+          scale: 1
+          tiers:
+            - price_usd: 0.03
+
+  - method: GET
+    path: 'internal/paysh/v1/compliance/sanctions-check/{address}'
+    description: 'Screens an address against OFAC SDN sanctions lists.'
+    metering:
+      dimensions:
+        - direction: usage
+          unit: requests
+          scale: 1
+          tiers:
+            - price_usd: 0.015
+
+  - method: GET
+    path: 'internal/paysh/v1/brand-verify/{domain}'
+    description: 'Composite 0-100 trust score for a domain: DNS/IP resolution, multi-region uptime verify (screenshots/Core Web Vitals), IP intelligence (geo/proxy detection).'
+    metering:
+      dimensions:
+        - direction: usage
+          unit: requests
+          scale: 1
+          tiers:
+            - price_usd: 0.23
+
+  - method: GET
+    path: 'internal/paysh/v1/x402/seller-trust/{encodedUrl}'
+    description: 'Composite 0-100 trust score for an x402 SELLER: live Bazaar usage/social proof, live 402 reachability probe, manifest quality, hosting legitimacy. encodedUrl must be percent-encoded.'
+    metering:
+      dimensions:
+        - direction: usage
+          unit: requests
+          scale: 1
+          tiers:
+            - price_usd: 0.23

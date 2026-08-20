@@ -785,6 +785,147 @@ app.get("/v1/compliance/sanctions-check/:address", async (req, res, next) => {
   }
 });
 
+
+// PATCH (2026-08-19): pay.sh internal proxy routes.
+//
+// pay.sh (https://pay.sh) runs its own payment gateway (`pay gate api`) on
+// its own infrastructure: it does the 402 handshake itself, using its own
+// rails, then in `routing: proxy` mode forwards the already-paid request to
+// an upstream URL. It is NOT built to sit in front of an API that already
+// does its own x402 gating -- pointed at a public /v1/* route here, this
+// app's own buildX402Middleware() would just 402 the (already-paid) request
+// again, since it has no way to know pay.sh already collected payment.
+//
+// Fix: these /internal/paysh/* routes are a second, unauthenticated-by-x402
+// front door onto the exact same data functions, deliberately NOT registered
+// in x402Middleware.js's `routes` map (buildX402Middleware() only gates
+// paths listed there, so anything else -- these included -- passes straight
+// through Express untouched by the payment layer). Gated instead by a
+// shared secret only pay.sh's provider.yml knows and injects
+// (`X-Internal-Key`, via provider.yml's `routing.auth` block) -- fails
+// closed if PAYSH_INTERNAL_KEY isn't set, so a misconfigured deploy 503s
+// instead of silently giving this catalog away for free. Cache keys are
+// shared with the matching public route (same `cached()` calls) so a
+// pay.sh-routed call and a direct call for the same resource don't double
+// the upstream load.
+//
+// Only the 10 routes with no existing pay.sh-catalog equivalent are exposed
+// here (see provider.yml) -- the commodity RPC routes (gas price, latest
+// block, wallet balance) aren't, since Quicknode already covers that lane on
+// pay.sh far more comprehensively.
+function requirePayshKey(req, res, next) {
+  const expected = process.env.PAYSH_INTERNAL_KEY;
+  if (!expected) {
+    return res.status(503).json({ error: "PAYSH_INTERNAL_KEY is not configured" });
+  }
+  if (req.headers["x-internal-key"] !== expected) {
+    return res.status(401).json({ error: "invalid or missing X-Internal-Key" });
+  }
+  next();
+}
+app.use("/internal/paysh", requirePayshKey);
+
+app.get("/internal/paysh/v1/pokt/service-demand", async (req, res, next) => {
+  try {
+    const limit = req.query.limit;
+    res.json(await cached(`pokt:demand:${limit || 10}`, 60, () => getPoktServiceDemand(limit)));
+  } catch (err) {
+    next(err);
+  }
+});
+
+app.get("/internal/paysh/v1/pokt/suppliers", async (req, res, next) => {
+  try {
+    const limit = req.query.limit;
+    res.json(await cached(`pokt:suppliers:${limit || 10}`, 60, () => getPoktSupplierLandscape(limit)));
+  } catch (err) {
+    next(err);
+  }
+});
+
+app.get("/internal/paysh/v1/pokt/applications", async (req, res, next) => {
+  try {
+    const limit = req.query.limit;
+    res.json(await cached(`pokt:applications:${limit || 10}`, 60, () => getPoktApplicationDemand(limit)));
+  } catch (err) {
+    next(err);
+  }
+});
+
+app.get("/internal/paysh/v1/pokt/tokenomics", async (req, res, next) => {
+  try {
+    res.json(await cached("pokt:tokenomics", 300, getPoktTokenomics));
+  } catch (err) {
+    next(err);
+  }
+});
+
+app.get("/internal/paysh/v1/pokt/throughput", async (req, res, next) => {
+  try {
+    const limit = req.query.limit;
+    res.json(await cached(`pokt:throughput:${limit || 10}`, 120, () => getPoktThroughputLeaderboard(limit)));
+  } catch (err) {
+    next(err);
+  }
+});
+
+app.get("/internal/paysh/v1/pokt/validators", async (req, res, next) => {
+  try {
+    const limit = req.query.limit;
+    res.json(await cached(`pokt:validators:${limit || 10}`, 300, () => getPoktValidatorSecurity(limit)));
+  } catch (err) {
+    next(err);
+  }
+});
+
+app.get("/internal/paysh/v1/peaq/machine-verify/:idOrAddress", async (req, res, next) => {
+  try {
+    const { idOrAddress } = req.params;
+    res.json(await cached(`peaq:verify:${idOrAddress}`, 300, () => getPeaqMachineVerification(idOrAddress)));
+  } catch (err) {
+    next(err);
+  }
+});
+
+app.get("/internal/paysh/v1/compliance/sanctions-check/:address", async (req, res, next) => {
+  try {
+    const { address } = req.params;
+    const { chain } = req.query;
+    res.json(await getSanctionsCheck(address, { chain }));
+  } catch (err) {
+    next(err);
+  }
+});
+
+app.get("/internal/paysh/v1/brand-verify/:domain", async (req, res, next) => {
+  try {
+    const { domain } = req.params;
+    const regions =
+      typeof req.query.regions === "string"
+        ? req.query.regions.split(",").map((r) => r.trim().toUpperCase()).filter(Boolean)
+        : undefined;
+    const cacheKey = `brand-verify:${domain}:${regions ? regions.join(",") : "default"}`;
+    res.json(await cached(cacheKey, 300, () => getBrandVerify(domain, { regions })));
+  } catch (err) {
+    next(err);
+  }
+});
+
+app.get("/internal/paysh/v1/x402/seller-trust/:encodedUrl", async (req, res, next) => {
+  try {
+    let url;
+    try {
+      url = decodeURIComponent(req.params.encodedUrl);
+    } catch {
+      return res.status(400).json({ error: "encodedUrl path segment must be percent-encoded" });
+    }
+    if (!url) return res.status(400).json({ error: "encodedUrl path segment is required" });
+    res.json(await cached(`x402-seller-trust:${url}`, 600, () => getX402SellerTrust(url)));
+  } catch (err) {
+    next(err);
+  }
+});
+
 // Centralized error handler — never leak stack traces to paying callers.
 app.use((err, req, res, _next) => {
   console.error(err);

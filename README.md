@@ -680,6 +680,50 @@ mispriced route.
 Zero new dependencies, zero new env vars, zero route/pricing changes --
 purely an internal polling-behavior fix.
 
+## pay.sh listing: internal proxy routes (2026-08-19)
+
+[pay.sh](https://pay.sh) (Solana Foundation) is a second discovery surface for
+this catalog, alongside x402 Bazaar -- worth pursuing because it's Solana-
+native (matches this project's primary settlement chain) and its
+CRYPTO/FINANCE category already carries comparable services (Nansen, Birdeye,
+Vybe Solana Analytics, smartmoney.market). Ten routes were selected for
+listing -- the six POKT Shannon routes, `peaq/machine-verify`,
+`compliance/sanctions-check`, `brand-verify`, and `x402/seller-trust` --
+because nothing on pay.sh's current catalog covers Pocket Network, peaq
+machine trust, or x402-seller trust scoring. The commodity RPC routes
+(gas price, latest block, wallet balance) were deliberately left off: pay.sh
+already lists Quicknode with 137 endpoints and a free tier covering that same
+lane far more comprehensively.
+
+**Why this needed new routes, not just a listing submission.** pay.sh isn't
+a catalog you submit a URL to -- it's a separate payment gateway
+(`pay gate api`) you run yourself, driven by a provider YAML spec, that does
+its own 402 handshake on its own infrastructure and then proxies the
+already-paid request to an upstream URL. Pointed straight at this app's
+public `/v1/*` routes, that would fail: this app's own `buildX402Middleware()`
+has no way to know pay.sh already collected payment, so it would 402 the
+(already-paid) request again.
+
+**Fix:** `/internal/paysh/*` -- ten routes in `server.js`, deliberately NOT
+registered in `x402Middleware.js`'s `routes` map (so `buildX402Middleware()`
+never touches them; unregistered paths pass straight through Express).
+Gated instead by a shared secret only pay.sh's provider spec knows:
+`X-Internal-Key`, checked against `PAYSH_INTERNAL_KEY` in a small middleware
+that fails closed -- if that env var is unset, every request under
+`/internal/paysh` 503s rather than silently serving the catalog for free.
+Cache keys are shared with the matching public route, so a pay.sh-routed call
+and a direct call for the same resource hit the same cache entry instead of
+doubling upstream load.
+
+**Setup still needed (not done by this patch):** generate a value for
+`PAYSH_INTERNAL_KEY` and set it in Portainer; deploy pay.sh's gateway itself
+(Vercel or GCP Cloud Run -- see `paysh-provider.yml` in this repo and
+https://pay.sh/docs/building-with-pay/deployment/overview) pointed at this
+app's public URL + `/internal/paysh/...` paths, with the same key injected
+via the spec's `routing.auth` block; submit the deployed pay.sh gateway URL
+through pay.sh's "List your API" form. None of that is required for the
+existing public `/v1/*` catalog or Bazaar listing -- this is purely additive.
+
 ## Routes and pricing
 
 | Route | Price | What it returns |

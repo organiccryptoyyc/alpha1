@@ -1208,6 +1208,22 @@ export const routes = {
       },
     }),
   },
+  "GET /v1/protocol/health": {
+    accepts: multiNetworkAccepts(0.02),
+    description: "Composite 0-100 health score for a DeFi protocol (by name/slug) or an entire chain (aggregate across every protocol live on it): TVL scale, 7d TVL momentum, fee-generating efficiency, chain diversification, and token valuation sanity, joined live from DefiLlama's free /protocols, /overview/fees, and /overview/fees?dataType=dailyRevenue endpoints.",
+    extensions: declareDiscoveryExtension({
+      input: { protocol: "lido" },
+      inputSchema: {
+        properties: {
+          protocol: { type: "string", description: "Protocol name or slug, e.g. 'lido', 'aave', 'uniswap' (single-protocol mode)" },
+          chain: { type: "string", description: "Chain name, e.g. 'Ethereum', 'Solana' (chain-aggregate mode across every protocol live on it -- ignored if protocol is set)" },
+        },
+      },
+      output: {
+        example: { source: "defillama-protocol-health", mode: "protocol", healthScore: 78, verdict: "healthy" },
+      },
+    }),
+  },
 };
 
 export function buildX402Middleware() {

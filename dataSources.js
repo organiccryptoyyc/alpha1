@@ -448,6 +448,221 @@ export async function getYieldAggregation({
   };
 }
 
+// --- Protocol/chain health composite (2026-08-22) --------------------------
+// Day 4 of the 2026-08-22 roadmap. Joins three free, keyless DefiLlama
+// endpoints -- /protocols (TVL, chains, mcap, category), /overview/fees
+// (protocol-level fee volume), and /overview/fees?dataType=dailyRevenue
+// (the cut that accrues to the protocol/token rather than to LPs) -- into
+// one 0-100 health score, mirroring brand_verify's composite-scoring
+// pattern (Promise.allSettled across independent sources, additive point
+// buckets, capped 0-100, named verdict tiers). Supports two modes: a single
+// protocol by slug/name, or a chain-wide aggregate across every protocol
+// live on that chain.
+const PROTOCOLS_URL = "https://api.llama.fi/protocols";
+const FEES_URL = "https://api.llama.fi/overview/fees";
+const REVENUE_URL = "https://api.llama.fi/overview/fees?dataType=dailyRevenue";
+
+async function fetchDefiLlamaJson(url, label) {
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`DefiLlama ${label} failed: HTTP ${res.status}`);
+  return res.json();
+}
+
+function matchProtocol(list, needle) {
+  const n = String(needle || "").toLowerCase();
+  if (!n) return null;
+  return (
+    list.find((p) => (p.slug || "").toLowerCase() === n) ||
+    list.find((p) => (p.name || "").toLowerCase() === n) ||
+    list.find((p) => (p.name || "").toLowerCase().includes(n)) ||
+    null
+  );
+}
+
+function scoreProtocolHealth({ tvlUsd, change7d, fees30d, tvlToMcap, chainsCount, hasToken }) {
+  let score = 0;
+  const reasons = [];
+
+  // Scale: bigger, more-adopted protocols get more credit (up to 25).
+  let scalePts;
+  if (tvlUsd >= 1e9) scalePts = 25;
+  else if (tvlUsd >= 1e8) scalePts = 18;
+  else if (tvlUsd >= 1e7) scalePts = 10;
+  else if (tvlUsd >= 1e6) scalePts = 5;
+  else scalePts = 0;
+  score += scalePts;
+  reasons.push(`TVL ~$${Math.round(tvlUsd).toLocaleString()} (+${scalePts})`);
+
+  // Momentum: growing TVL over the last 7 days (up to 20).
+  let momentumPts;
+  if (change7d == null) momentumPts = 0;
+  else if (change7d >= 10) momentumPts = 20;
+  else if (change7d >= 0) momentumPts = 12;
+  else if (change7d >= -10) momentumPts = 5;
+  else momentumPts = 0;
+  score += momentumPts;
+  reasons.push(change7d == null ? "no 7d TVL change data (+0)" : `TVL change 7d ${change7d.toFixed(1)}% (+${momentumPts})`);
+
+  // Fee-generating efficiency: 30d fees annualized against TVL (up to 25).
+  let feePts = 0;
+  let feeToTvlAnnualized = null;
+  if (fees30d != null && tvlUsd > 0) {
+    feeToTvlAnnualized = (fees30d * 12) / tvlUsd;
+    if (feeToTvlAnnualized >= 0.2) feePts = 25;
+    else if (feeToTvlAnnualized >= 0.05) feePts = 18;
+    else if (feeToTvlAnnualized >= 0.01) feePts = 10;
+    else if (feeToTvlAnnualized > 0) feePts = 5;
+  }
+  score += feePts;
+  reasons.push(feeToTvlAnnualized == null ? "no fee data (+0)" : `annualized fee/TVL ${(feeToTvlAnnualized * 100).toFixed(1)}% (+${feePts})`);
+
+  // Diversification: spread across chains reduces single-chain risk (up to
+  // 15). Not applicable in chain-aggregate mode (chainsCount passed as null).
+  let diversPts = 0;
+  if (chainsCount == null) {
+    reasons.push("chain diversification not applicable in chain mode (+0)");
+  } else {
+    if (chainsCount >= 5) diversPts = 15;
+    else if (chainsCount >= 3) diversPts = 10;
+    else if (chainsCount >= 2) diversPts = 5;
+    score += diversPts;
+    reasons.push(`live on ${chainsCount} chain(s) (+${diversPts})`);
+  }
+
+  // Valuation sanity: token mcap vs TVL it secures (up to 15). No token
+  // (common for pure money-market/DEX protocols) isn't penalized, just
+  // left unscored on this axis.
+  let valPts = 0;
+  if (hasToken && tvlToMcap != null) {
+    if (tvlToMcap <= 1) valPts = 15;
+    else if (tvlToMcap <= 3) valPts = 10;
+    else if (tvlToMcap <= 10) valPts = 5;
+    score += valPts;
+    reasons.push(`TVL/mcap ratio ${tvlToMcap.toFixed(2)} (+${valPts})`);
+  } else if (hasToken) {
+    reasons.push("valuation data unavailable (+0)");
+  } else {
+    reasons.push("no token to evaluate valuation (+0)");
+  }
+
+  score = Math.max(0, Math.min(100, score));
+  let verdict;
+  if (score >= 80) verdict = "thriving";
+  else if (score >= 55) verdict = "healthy";
+  else if (score >= 30) verdict = "declining";
+  else verdict = "at-risk";
+
+  return { score, verdict, reasons };
+}
+
+export async function getProtocolHealth({ protocol: protocolRaw, chain: chainRaw } = {}) {
+  const protocolQuery = protocolRaw ? String(protocolRaw).trim() : null;
+  const chainQuery = chainRaw ? String(chainRaw).trim() : null;
+  if (!protocolQuery && !chainQuery) {
+    throw new Error("protocol or chain query param is required");
+  }
+
+  const [protocolsResult, feesResult, revenueResult] = await Promise.allSettled([
+    fetchDefiLlamaJson(PROTOCOLS_URL, "protocols"),
+    fetchDefiLlamaJson(FEES_URL, "fees"),
+    fetchDefiLlamaJson(REVENUE_URL, "revenue"),
+  ]);
+
+  const protocols = protocolsResult.status === "fulfilled" ? protocolsResult.value : [];
+  const feesProtocols = feesResult.status === "fulfilled" ? (feesResult.value.protocols || []) : [];
+  const revenueProtocols = revenueResult.status === "fulfilled" ? (revenueResult.value.protocols || []) : [];
+  const protocolsError = protocolsResult.status === "rejected" ? protocolsResult.reason?.message : null;
+  const feesError = feesResult.status === "rejected" ? feesResult.reason?.message : null;
+  const revenueError = revenueResult.status === "rejected" ? revenueResult.reason?.message : null;
+
+  if (protocolQuery) {
+    const proto = matchProtocol(protocols, protocolQuery);
+    if (!proto) throw new Error(`no protocol matched "${protocolQuery}"`);
+
+    const feeMatch = matchProtocol(feesProtocols, proto.slug || proto.name);
+    const revMatch = matchProtocol(revenueProtocols, proto.slug || proto.name);
+
+    const tvlUsd = proto.tvl || 0;
+    const change7d = typeof proto.change_7d === "number" ? proto.change_7d : null;
+    const chainsCount = Array.isArray(proto.chains) ? proto.chains.length : (proto.chain ? 1 : 0);
+    const hasToken = !!proto.gecko_id || proto.mcap != null;
+    const tvlToMcap = hasToken && proto.mcap ? tvlUsd / proto.mcap : null;
+    const fees30d = feeMatch ? (feeMatch.total30d ?? null) : null;
+
+    const health = scoreProtocolHealth({ tvlUsd, change7d, fees30d, tvlToMcap, chainsCount, hasToken });
+
+    return {
+      source: "defillama-protocol-health",
+      mode: "protocol",
+      protocol: proto.name,
+      slug: proto.slug,
+      category: proto.category || null,
+      chains: proto.chains || (proto.chain ? [proto.chain] : []),
+      tvlUsd,
+      change1d: typeof proto.change_1d === "number" ? proto.change_1d : null,
+      change7d,
+      mcapUsd: proto.mcap ?? null,
+      fees24h: feeMatch?.total24h ?? null,
+      fees7d: feeMatch?.total7d ?? null,
+      fees30d,
+      revenue24h: revMatch?.total24h ?? null,
+      revenue7d: revMatch?.total7d ?? null,
+      revenue30d: revMatch?.total30d ?? null,
+      healthScore: health.score,
+      verdict: health.verdict,
+      scoringReasons: health.reasons,
+      dataErrors: { protocolsError, feesError, revenueError },
+      fetchedAt: new Date().toISOString(),
+    };
+  }
+
+  // chain mode: aggregate every protocol whose chains[] includes the
+  // requested chain -- summed TVL/fees/revenue plus a protocol count, giving
+  // a chain-level health snapshot instead of a single protocol's.
+  const chainNeedle = chainQuery.toLowerCase();
+  const chainProtocols = protocols.filter((p) => Array.isArray(p.chains) && p.chains.some((c) => String(c).toLowerCase() === chainNeedle));
+  if (chainProtocols.length === 0) throw new Error(`no protocols found on chain "${chainQuery}"`);
+
+  const chainTvlUsd = chainProtocols.reduce((sum, p) => sum + (p.tvl || 0), 0);
+  const weightedChange7d = chainTvlUsd > 0
+    ? chainProtocols.reduce((sum, p) => sum + (p.tvl || 0) * (typeof p.change_7d === "number" ? p.change_7d : 0), 0) / chainTvlUsd
+    : null;
+
+  const chainFees = feesProtocols.filter((f) => Array.isArray(f.chains) && f.chains.some((c) => String(c).toLowerCase() === chainNeedle));
+  const chainRevenue = revenueProtocols.filter((f) => Array.isArray(f.chains) && f.chains.some((c) => String(c).toLowerCase() === chainNeedle));
+  const fees30d = chainFees.reduce((sum, f) => sum + (f.total30d || 0), 0);
+  const fees24h = chainFees.reduce((sum, f) => sum + (f.total24h || 0), 0);
+  const revenue30d = chainRevenue.reduce((sum, f) => sum + (f.total30d || 0), 0);
+  const revenue24h = chainRevenue.reduce((sum, f) => sum + (f.total24h || 0), 0);
+
+  const health = scoreProtocolHealth({
+    tvlUsd: chainTvlUsd,
+    change7d: weightedChange7d,
+    fees30d,
+    tvlToMcap: null,
+    chainsCount: null,
+    hasToken: false,
+  });
+
+  return {
+    source: "defillama-protocol-health",
+    mode: "chain",
+    chain: chainQuery,
+    protocolCount: chainProtocols.length,
+    tvlUsd: chainTvlUsd,
+    change7dTvlWeighted: weightedChange7d,
+    fees24h,
+    fees30d,
+    revenue24h,
+    revenue30d,
+    healthScore: health.score,
+    verdict: health.verdict,
+    scoringReasons: health.reasons,
+    dataErrors: { protocolsError, feesError, revenueError },
+    fetchedAt: new Date().toISOString(),
+  };
+}
+
 // --- POKT Shannon service-demand snapshot ---------------------------------
 // Sourced live from Pocket Network's public GraphQL indexer (Pocketdex).
 // This is deliberately NOT a price/RPC pass-through like everything above --

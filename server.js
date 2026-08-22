@@ -47,6 +47,7 @@ import {
   getEthLogs,
   getStablecoinDepeg,
   getYieldAggregation,
+  getProtocolHealth,
   getSolTransactionHistory,
   getSanctionsCheck,
   getCurrencyConversion,
@@ -780,6 +781,20 @@ app.get("/v1/defi/yields", async (req, res, next) => {
     const { chain, project, symbol, stablecoinOnly, minTvlUsd, sortBy, limit, includeOutliers } = req.query;
     const cacheKey = `defi:yields:${chain || ""}:${project || ""}:${symbol || ""}:${stablecoinOnly || ""}:${minTvlUsd || ""}:${sortBy || ""}:${limit || ""}:${includeOutliers || ""}`;
     res.json(await cached(cacheKey, 600, () => getYieldAggregation({ chain, project, symbol, stablecoinOnly, minTvlUsd, sortBy, limit, includeOutliers })));
+  } catch (err) {
+    next(err);
+  }
+});
+
+// Protocol/chain health composite (2026-08-22). $0.02/call (network-dependent
+// via multiNetworkAccepts). 10min cache -- matches defi/yields' TTL since it
+// shares the same DefiLlama upstream freshness.
+app.get("/v1/protocol/health", async (req, res, next) => {
+  try {
+    const { protocol, chain } = req.query;
+    if (!protocol && !chain) return res.status(400).json({ error: "protocol or chain query param is required" });
+    const cacheKey = `protocol:health:${protocol || ""}:${chain || ""}`;
+    res.json(await cached(cacheKey, 600, () => getProtocolHealth({ protocol, chain })));
   } catch (err) {
     next(err);
   }

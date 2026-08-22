@@ -1638,6 +1638,113 @@ export async function getPuppeteerScreenshot(targetUrl) {
   };
 }
 
+// --- Currency conversion (ECB reference rates via Frankfurter) --------------
+// PATCH (2026-08-22): backs GET /v1/currency/convert. Free, keyless upstream
+// (Frankfurter -- ECB daily reference rates, https://frankfurter.dev) same
+// "free source first" discipline as getWebSearch()'s SearXNG and
+// getSanctionsCheck()'s OFAC list -- no per-call credit cost, so margin here
+// is effectively 100% above hosting. Priced at $0.01/call in x402Middleware.js,
+// deliberately undercutting the ~$0.02 median found on live Bazaar
+// comparables researched 2026-08-22 (Vibe Springs, NetIntel, TickersFeed) to
+// take share in a category with real, proven multi-payer demand (Otto AI:
+// 22 unique payers on just 35 calls/30d -- the highest payer-density signal
+// found researching this category).
+const FRANKFURTER_URL = "https://api.frankfurter.dev/v1/latest";
+const CURRENCY_CODE_RE = /^[A-Za-z]{3}$/;
+
+export async function getCurrencyConversion(from, to, amount) {
+  if (!from || !to) throw new Error("from and to query params are required, e.g. from=USD&to=EUR");
+  const fromCode = from.toUpperCase();
+  const toCode = to.toUpperCase();
+  if (!CURRENCY_CODE_RE.test(fromCode) || !CURRENCY_CODE_RE.test(toCode)) {
+    throw new Error("from and to must be 3-letter ISO 4217 currency codes, e.g. USD, EUR, JPY");
+  }
+  const amt = amount !== undefined ? Number(amount) : 1;
+  if (!Number.isFinite(amt) || amt <= 0) {
+    throw new Error("amount must be a positive number");
+  }
+
+  const url = `${FRANKFURTER_URL}?base=${fromCode}&symbols=${toCode}`;
+  const res = await fetch(url);
+  if (!res.ok) {
+    throw new Error(`currency conversion upstream returned HTTP ${res.status}`);
+  }
+  const json = await res.json();
+  const rate = json.rates && json.rates[toCode];
+  if (rate === undefined) {
+    throw new Error(`no rate found for ${fromCode} -> ${toCode} (check currency codes are valid ISO 4217)`);
+  }
+
+  return {
+    source: "frankfurter-ecb",
+    from: fromCode,
+    to: toCode,
+    amount: amt,
+    rate,
+    convertedAmount: Number((amt * rate).toFixed(6)),
+    rateDate: json.date,
+    fetchedAt: new Date().toISOString(),
+  };
+}
+
+// --- Webpage-to-PDF render (via puppeteer-render service) -------------------
+// PATCH (2026-08-22): backs GET /v1/render/pdf. Same puppeteer-render
+// container as getPuppeteerScreenshot() above -- one extra endpoint
+// (POST /pdf, using Puppeteer's page.pdf()) on an already-isolated service
+// rather than a new container, since the resource profile (headless Chrome)
+// is identical. Priced at $0.01/call in x402Middleware.js, undercutting the
+// closest live comparable found (Relaystation's URL-to-PDF at $0.02/render,
+// 29 calls/30d -- the strongest signal in this niche, though still early).
+//
+// SSRF hardening: reuses the exact same isBlockedTarget() denylist as
+// getPuppeteerScreenshot() above, checked here before the render service is
+// ever called.
+export async function getPuppeteerPdf(targetUrl, { format, landscape } = {}) {
+  if (!targetUrl) throw new Error("url query param is required");
+  let parsed;
+  try {
+    parsed = new URL(targetUrl);
+  } catch {
+    throw new Error("url must be a valid absolute URL, e.g. https://example.com");
+  }
+  if (["http:", "https:"].includes(parsed.protocol) === false) {
+    throw new Error("url must use http or https");
+  }
+  if (isBlockedTarget(parsed.hostname)) {
+    throw new Error("url must not target a localhost, private, or link-local address");
+  }
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), RENDER_TIMEOUT_MS);
+  let res;
+  try {
+    res = await fetch(`${PUPPETEER_RENDER_URL}/pdf`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ url: parsed.toString(), format, landscape }),
+      signal: controller.signal,
+    });
+  } catch (err) {
+    throw new Error(`puppeteer-render service unreachable: ${err.message}`);
+  } finally {
+    clearTimeout(timeout);
+  }
+
+  const json = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    throw new Error(json.error || `puppeteer-render service returned HTTP ${res.status}`);
+  }
+
+  return {
+    source: "puppeteer-pdf",
+    url: parsed.toString(),
+    statusCode: json.statusCode ?? null,
+    format: json.format,
+    pdfBase64: json.pdfBase64,
+    renderedAt: new Date().toISOString(),
+  };
+}
+
 // --- HEIC to PNG conversion --------------------------------------------
 // PATCH (2026-08-15): backs GET /v1/convert/heic-to-png. Straightforward
 // utility conversion -- fetches a caller-supplied HEIC/HEIF image and
@@ -1723,6 +1830,80 @@ export async function getHeicToPng(targetUrl) {
   };
 }
 
+
+// --- Image OCR (Tesseract, via puppeteer-render service) --------------------
+// PATCH (2026-08-22): backs GET /v1/image/ocr. Runs in the puppeteer-render
+// container rather than this one, for the same "isolate real CPU/RAM work"
+// reason getPuppeteerScreenshot()/getPuppeteerPdf() above already do -- OCR
+// is genuine CPU-bound compute (Tesseract), not this file's usual near-zero-
+// cost JSON pass-through, so a burst of OCR requests should never be able to
+// starve the main API's event loop. Priced at $0.01/call in
+// x402Middleware.js, undercutting the closest live comparables found
+// researching this category (mostly $0.05-0.10/call for scanned-PDF OCR;
+// the plain-image-OCR niche is thinner but growing -- newest entrant found
+// already at 11 calls/2 payers this month).
+//
+// SSRF hardening + size cap: reuses the exact same isBlockedTarget()
+// denylist and a byte-size guard, same pattern as getHeicToPng() above.
+const OCR_MAX_INPUT_BYTES = 15 * 1024 * 1024;
+
+export async function getImageOcr(targetUrl) {
+  if (!targetUrl) throw new Error("url query param is required");
+  let parsed;
+  try {
+    parsed = new URL(targetUrl);
+  } catch {
+    throw new Error("url must be a valid absolute URL, e.g. https://example.com/photo.png");
+  }
+  if (["http:", "https:"].includes(parsed.protocol) === false) {
+    throw new Error("url must use http or https");
+  }
+  if (isBlockedTarget(parsed.hostname)) {
+    throw new Error("url must not target a localhost, private, or link-local address");
+  }
+
+  const imgRes = await fetch(parsed.toString());
+  if (!imgRes.ok) {
+    throw new Error(`failed to fetch source image: HTTP ${imgRes.status}`);
+  }
+  const declaredLength = Number(imgRes.headers.get("content-length") || 0);
+  if (declaredLength > OCR_MAX_INPUT_BYTES) {
+    throw new Error(`source image is too large (${declaredLength} bytes, max ${OCR_MAX_INPUT_BYTES})`);
+  }
+  const buffer = Buffer.from(await imgRes.arrayBuffer());
+  if (buffer.length > OCR_MAX_INPUT_BYTES) {
+    throw new Error(`source image is too large (${buffer.length} bytes, max ${OCR_MAX_INPUT_BYTES})`);
+  }
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), RENDER_TIMEOUT_MS);
+  let res;
+  try {
+    res = await fetch(`${PUPPETEER_RENDER_URL}/ocr`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ imageBase64: buffer.toString("base64") }),
+      signal: controller.signal,
+    });
+  } catch (err) {
+    throw new Error(`puppeteer-render service unreachable: ${err.message}`);
+  } finally {
+    clearTimeout(timeout);
+  }
+
+  const json = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    throw new Error(json.error || `puppeteer-render service returned HTTP ${res.status}`);
+  }
+
+  return {
+    source: "tesseract-ocr",
+    url: parsed.toString(),
+    text: json.text,
+    confidence: json.confidence,
+    extractedAt: new Date().toISOString(),
+  };
+}
 
 // --- Web search (self-hosted SearXNG) --------------------------------------
 // PATCH (2026-08-16): backs GET /v1/search/web. Unlike every URL-fetching

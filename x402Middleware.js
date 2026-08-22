@@ -1045,13 +1045,16 @@ export const routes = {
   // Solana RPC spec's own hard 1000-signature cap on getSignaturesForAddress).
   "GET /v1/eth/logs": {
     accepts: multiNetworkAccepts(0.012),
-    description: "Recent Ethereum event logs for a contract/address (bounded to the last 1000 blocks, not full-archive history).",
+    description: "Recent Ethereum event logs for a contract/address (bounded to the last 1000 blocks, not full-archive history). Optional whale-transfer filtering: pass decimals + tokenUsdPrice to get an estimated USD value per log, and minUsd to only return logs at or above that value.",
     extensions: declareDiscoveryExtension({
       queryParams: {
         properties: {
           address: { type: "string", description: "Contract or wallet address to filter logs by" },
           topic0: { type: "string", description: "Optional event signature hash to filter by" },
           blocks: { type: "string", description: "How many recent blocks to search, max 1000 (default 500)" },
+          decimals: { type: "string", description: "Token decimals for value decoding (default 18, e.g. 6 for USDC)" },
+          tokenUsdPrice: { type: "string", description: "Current USD price of the token, used to compute estimatedUsd per log (omit to skip USD conversion)" },
+          minUsd: { type: "string", description: "Only return logs with estimatedUsd at or above this threshold (requires tokenUsdPrice)" },
         },
         required: ["address"],
       },
@@ -1164,6 +1167,22 @@ export const routes = {
       },
       output: {
         example: { source: "tesseract-ocr", text: "example text", confidence: 92.4 },
+      },
+    }),
+  },
+  "GET /v1/stablecoin/depeg-check": {
+    accepts: multiNetworkAccepts(0.01),
+    description: "Checks major stablecoins (USDT, USDC, DAI, and others) against their $1.00 peg using live CoinGecko prices; flags any deviating beyond a configurable threshold.",
+    extensions: declareDiscoveryExtension({
+      input: { symbols: "usdt,usdc,dai", thresholdPct: 0.5 },
+      inputSchema: {
+        properties: {
+          symbols: { type: "string", description: "Comma-separated stablecoin symbols to check (default: all supported -- usdt,usdc,dai,frax,tusd,usdp,fdusd,pyusd)" },
+          thresholdPct: { type: "number", description: "Deviation percent that counts as depegged (default 0.5)" },
+        },
+      },
+      output: {
+        example: { source: "coingecko-stablecoin-depeg", thresholdPct: 0.5, anyDepegged: false },
       },
     }),
   },

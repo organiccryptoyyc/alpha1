@@ -758,6 +758,29 @@ All three reuse this file's existing `isBlockedTarget()` SSRF denylist
 `cached()` helper -- no new caching or security infrastructure, same
 pattern as every route added since `render/screenshot`.
 
+
+## Roadmap: 10 replicable data products, ranked by build difficulty (2026-08-22)
+
+Following the currency/PDF/OCR build round, researched the top 10 aggregated-data products sold by larger companies (staking/yield aggregators, wallet-labeling services, KYB providers, terminal-style analytics, domain-authority scorers) that Alpha7 could replicate cheaply on free/keyless upstreams and existing infrastructure. Ranked here by ease-of-build/deploy-speed for a roughly one-week rollout at 1-2 shipped per day, not by demand-signal (that ranking was delivered in chat and isn't duplicated here). Two items are flagged as modifications to existing routes rather than new services, per standing principle: prefer extending a current offering over shipping a new one when the opportunity exists.
+
+**Day 1 -- stablecoin depeg monitor (new, tiny) + x402-seller-trust economic-proof upgrade (modify existing `x402_seller_trust` route, no new route/price, adds a settlement-volume/distinct-payer signal via the same CDP discovery-API pattern already in the codebase).**
+
+**Day 2 -- whale-transfer alert route (new thin route built on the existing `getEthLogs()`, adds a USD-value threshold filter; kept as its own listing rather than folded into `eth/logs` because the buyer intent -- "alert me to whale moves" -- differs from "give me raw logs," same reasoning that justified `seller-trust` as its own product on top of existing primitives -- flagged here for discussion, could alternatively ship as free query params on `eth/logs` instead) + domain-authority-into-brand_verify upgrade (modify existing `brand_verify` route, folds in a Tranco top-1M rank as one more composite signal, no new charge).**
+
+**Day 3 -- DeFi/staking yield aggregation (new route, single free API at yields.llama.fi/pools, fetch+filter+sort+cache, matches the shape of existing routes closely).**
+
+**Day 4 -- protocol/chain health composite (new route, shares the DefiLlama upstream built on Day 3, adds a fees/revenue join plus composite scoring similar to brand_verify's pattern).**
+
+**Day 5 -- NFT collection analytics (new route, two upstreams -- CoinGecko NFT API and Magic Eden API -- normalized across chains, composite market-health scoring).**
+
+**Days 6-7 -- SEC EDGAR company fundamentals (new route, needs a ticker-to-CIK mapping table plus XBRL facts parsing, which varies by company/taxonomy -- more edge-case handling than anything above it).**
+
+**Beyond this week (flagged as multi-day, not forced into the 1-2/day cadence):**
+- KYB/business verification composite -- new multi-route family, different query formats per country registry, fuzzy name matching, reuses the existing `getSanctionsCheck()`.
+- Wallet smart-money scoring -- hardest build on the list, needs real PnL reconstruction from raw transfer/swap history; correctly last.
+
+No build has started on any of these 10 items -- this section is a planning note only. Each item still needs explicit go-ahead before work begins, per the research -> rank -> document -> build-on-sign-off pattern used throughout this repo's history.
+
 ## Routes and pricing
 
 | Route | Price | What it returns |

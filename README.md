@@ -778,6 +778,10 @@ Following the currency/PDF/OCR build round, researched the top 10 aggregated-dat
 **Beyond this week (flagged as multi-day, not forced into the 1-2/day cadence):**
 - KYB/business verification composite -- new multi-route family, different query formats per country registry, fuzzy name matching, reuses the existing `getSanctionsCheck()`.
 - Wallet smart-money scoring -- hardest build on the list, needs real PnL reconstruction from raw transfer/swap history; correctly last.
+  - **To be reviewed:** this one might lean on POKT further than the others -- Shannon's indexer (Pocketdex) already exposes per-supplier relay/session history, and if a POKT-run RPC gateway is in the mix for the EVM/Solana pass-throughs this project uses, that's a second angle for reconstructing wallet activity without relying solely on a single chain's public RPC. Not scoped yet, just flagged here so it's not forgotten when this item comes up.
+
+**Progress (2026-08-22):** Day 1 shipped as 3 modifications + 1 new route (see PR #1, merged to main, backup branch `backup/verified-working-2026-08-22-round2`): x402_seller_trust gained approxSettledUsd30d, brand_verify gained a Tranco domain-rank signal, eth/logs gained optional whale-transfer filtering (decimals/tokenUsdPrice/minUsd), and GET /v1/stablecoin/depeg-check shipped as the first new route off this list. Remaining: domain-authority-into-brand_verify (already done above, folded in same round), DeFi/staking yield aggregation, protocol/chain health composite, NFT collection analytics, SEC EDGAR company fundamentals, KYB/business verification composite, and wallet smart-money scoring.
+
 
 No build has started on any of these 10 items -- this section is a planning note only. Each item still needs explicit go-ahead before work begins, per the research -> rank -> document -> build-on-sign-off pattern used throughout this repo's history.
 

@@ -372,6 +372,82 @@ export async function getStablecoinDepeg({ symbols: symbolsRaw, thresholdPct: th
   };
 }
 
+// --- DeFi/staking yield aggregation (2026-08-22) ---------------------------
+// Second full new build off the 2026-08-22 difficulty-ranked roadmap. Wraps
+// DefiLlama's free, keyless /pools endpoint (16k+ live pools across every
+// major chain) with the filtering a real buyer actually wants: a minimum
+// TVL floor (so tiny/manipulated pools don't dominate results), DefiLlama's
+// own "outlier" data-quality flag excluded by default, and sort/limit
+// controls -- turning a 16k-row dump into a short, sane top-N list.
+const YIELDS_URL = "https://yields.llama.fi/pools";
+const YIELD_DEFAULT_MIN_TVL_USD = 100000;
+const YIELD_DEFAULT_LIMIT = 20;
+const YIELD_MAX_LIMIT = 100;
+
+export async function getYieldAggregation({
+  chain: chainRaw,
+  project: projectRaw,
+  symbol: symbolRaw,
+  stablecoinOnly: stablecoinOnlyRaw,
+  minTvlUsd: minTvlUsdRaw,
+  limit: limitRaw,
+  sortBy: sortByRaw,
+  includeOutliers: includeOutliersRaw,
+} = {}) {
+  const res = await fetch(YIELDS_URL);
+  if (!res.ok) throw new Error(`DefiLlama yields failed: HTTP ${res.status}`);
+  const json = await res.json();
+  const allPools = Array.isArray(json?.data) ? json.data : [];
+
+  const chain = chainRaw ? String(chainRaw).trim().toLowerCase() : null;
+  const project = projectRaw ? String(projectRaw).trim().toLowerCase() : null;
+  const symbol = symbolRaw ? String(symbolRaw).trim().toLowerCase() : null;
+  const stablecoinOnly = String(stablecoinOnlyRaw).toLowerCase() === "true";
+  const includeOutliers = String(includeOutliersRaw).toLowerCase() === "true";
+  const minTvlUsd = Math.max(0, Number(minTvlUsdRaw) || YIELD_DEFAULT_MIN_TVL_USD);
+  const limit = Math.max(1, Math.min(Math.trunc(Number(limitRaw)) || YIELD_DEFAULT_LIMIT, YIELD_MAX_LIMIT));
+  const sortBy = sortByRaw === "tvlUsd" ? "tvlUsd" : "apy";
+
+  let filtered = allPools.filter((p) => {
+    if ((p.tvlUsd || 0) < minTvlUsd) return false;
+    if (!includeOutliers && p.outlier === true) return false;
+    if (chain && String(p.chain || "").toLowerCase() !== chain) return false;
+    if (project && !String(p.project || "").toLowerCase().includes(project)) return false;
+    if (symbol && !String(p.symbol || "").toLowerCase().includes(symbol)) return false;
+    if (stablecoinOnly && !p.stablecoin) return false;
+    return true;
+  });
+
+  const matchedCount = filtered.length;
+  filtered.sort((a, b) => (b[sortBy] || 0) - (a[sortBy] || 0));
+  const pools = filtered.slice(0, limit).map((p) => ({
+    poolId: p.pool,
+    chain: p.chain,
+    project: p.project,
+    symbol: p.symbol,
+    tvlUsd: p.tvlUsd,
+    apy: p.apy,
+    apyBase: p.apyBase,
+    apyReward: p.apyReward,
+    apyPct7D: p.apyPct7D,
+    apyPct30D: p.apyPct30D,
+    stablecoin: !!p.stablecoin,
+    ilRisk: p.ilRisk || null,
+    exposure: p.exposure || null,
+    predictedClass: p.predictions?.predictedClass ?? null,
+  }));
+
+  return {
+    source: "defillama-yields",
+    filters: { chain, project, symbol, stablecoinOnly, minTvlUsd, includeOutliers, sortBy, limit },
+    totalPoolsScanned: allPools.length,
+    matchedCount,
+    returnedCount: pools.length,
+    pools,
+    fetchedAt: new Date().toISOString(),
+  };
+}
+
 // --- POKT Shannon service-demand snapshot ---------------------------------
 // Sourced live from Pocket Network's public GraphQL indexer (Pocketdex).
 // This is deliberately NOT a price/RPC pass-through like everything above --

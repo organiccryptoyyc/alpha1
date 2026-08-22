@@ -1186,6 +1186,28 @@ export const routes = {
       },
     }),
   },
+  "GET /v1/defi/yields": {
+    accepts: multiNetworkAccepts(0.01),
+    description: "Top DeFi/staking yield pools across every major chain, filtered by minimum TVL and sorted by APY or TVL; sourced live from DefiLlama's free pool index.",
+    extensions: declareDiscoveryExtension({
+      input: { chain: "Ethereum", minTvlUsd: 1000000, limit: 10 },
+      inputSchema: {
+        properties: {
+          chain: { type: "string", description: "Filter to a single chain, e.g. 'Ethereum', 'Solana', 'Base'" },
+          project: { type: "string", description: "Filter to a protocol name substring, e.g. 'lido', 'aave'" },
+          symbol: { type: "string", description: "Filter to a token symbol substring, e.g. 'USDC'" },
+          stablecoinOnly: { type: "string", description: "'true' to only return stablecoin pools" },
+          minTvlUsd: { type: "string", description: "Minimum pool TVL in USD (default 100000)" },
+          sortBy: { type: "string", description: "'apy' (default) or 'tvlUsd'" },
+          limit: { type: "string", description: "Max pools to return, up to 100 (default 20)" },
+          includeOutliers: { type: "string", description: "'true' to include DefiLlama-flagged outlier pools (excluded by default)" },
+        },
+      },
+      output: {
+        example: { source: "defillama-yields", matchedCount: 42, returnedCount: 10 },
+      },
+    }),
+  },
 };
 
 export function buildX402Middleware() {

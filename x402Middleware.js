@@ -1102,6 +1102,71 @@ export const routes = {
       },
     }),
   },
+  // Currency conversion (ECB reference rates via Frankfurter, free/keyless
+  // upstream -- see getCurrencyConversion() in dataSources.js). $0.01/call,
+  // deliberately undercutting the ~$0.02 median found on live Bazaar
+  // comparables researched 2026-08-22. 3600s cache in server.js -- ECB rates
+  // only update once daily, so an hour-long cache costs no real accuracy.
+  "GET /v1/currency/convert": {
+    accepts: multiNetworkAccepts(0.01),
+    description: "Convert an amount between two ISO 4217 currencies using ECB daily reference rates.",
+    extensions: declareDiscoveryExtension({
+      input: { from: "USD", to: "EUR", amount: 100 },
+      inputSchema: {
+        properties: {
+          from: { type: "string", description: "3-letter ISO 4217 source currency code, e.g. USD" },
+          to: { type: "string", description: "3-letter ISO 4217 target currency code, e.g. EUR" },
+          amount: { type: "number", description: "Amount to convert (default 1)" },
+        },
+        required: ["from", "to"],
+      },
+      output: {
+        example: { source: "frankfurter-ecb", from: "USD", to: "EUR", rate: 0.92, convertedAmount: 92 },
+      },
+    }),
+  },
+  // Webpage-to-PDF render via the puppeteer-render service (see
+  // getPuppeteerPdf() in dataSources.js) -- same container as
+  // render/screenshot below. $0.01/call, undercutting the closest live
+  // comparable found (Relaystation's URL-to-PDF at $0.02/render).
+  "GET /v1/render/pdf": {
+    accepts: multiNetworkAccepts(0.01),
+    description: "Render a webpage to PDF (base64-encoded), via headless Chrome.",
+    extensions: declareDiscoveryExtension({
+      input: { url: "https://example.com" },
+      inputSchema: {
+        properties: {
+          url: { type: "string", description: "Absolute URL to render as PDF (http or https)" },
+          format: { type: "string", description: "Page size, e.g. Letter, A4 (default Letter)" },
+          landscape: { type: "boolean", description: "Landscape orientation (default false)" },
+        },
+        required: ["url"],
+      },
+      output: {
+        example: { source: "puppeteer-pdf", statusCode: 200, format: "Letter" },
+      },
+    }),
+  },
+  // Image OCR (Tesseract, via the puppeteer-render service -- see
+  // getImageOcr() in dataSources.js). $0.01/call, undercutting the ~$0.05-0.10
+  // median found for scanned-PDF OCR comparables; the plain-image-OCR niche
+  // itself is thinner but growing.
+  "GET /v1/image/ocr": {
+    accepts: multiNetworkAccepts(0.01),
+    description: "Extract text from an image via OCR (Tesseract).",
+    extensions: declareDiscoveryExtension({
+      input: { url: "https://example.com/photo.png" },
+      inputSchema: {
+        properties: {
+          url: { type: "string", description: "Absolute URL to an image (http or https)" },
+        },
+        required: ["url"],
+      },
+      output: {
+        example: { source: "tesseract-ocr", text: "example text", confidence: 92.4 },
+      },
+    }),
+  },
 };
 
 export function buildX402Middleware() {

@@ -6,22 +6,32 @@
 // Uses Node's built-in global fetch (stable since Node 18) instead of the
 // node-fetch package -- one less dependency to install/break.
 
-const ETH_RPC_URL = process.env.ETH_RPC_URL || "https://eth.llamarpc.com";
-const SOL_RPC_URL = process.env.SOL_RPC_URL || "https://api.mainnet-beta.solana.com";
+// Defaults point at Pocket Network's free, keyless public RPC gateway
+// (api.pocket.network) instead of a single-operator public RPC. Verified
+// live 2026-08-22: eth_getLogs, eth_getBalance at block 1,000,000 (archive
+// depth), and Solana getSignaturesForAddress all returned real data with no
+// throttling under a 25-request concurrent burst. Backed by 5,000+
+// independent node operators rather than one provider -- more resilient,
+// same JSON-RPC interface, $0 cost at this project's volume.
+const ETH_RPC_URL = process.env.ETH_RPC_URL || "https://eth.api.pocket.network";
+const SOL_RPC_URL = process.env.SOL_RPC_URL || "https://solana.api.pocket.network";
 // peaq is a standard EVM chain (chain ID 3338) -- same JSON-RPC interface as
 // ETH_RPC_URL above, just pointed at peaq's public RPC by default. Free
 // public endpoints (publicnode, OnFinality, etc.) are fine for these
 // low-frequency snapshot calls; swap in a paid/private RPC if volume grows.
 const PEAQ_RPC_URL = process.env.PEAQ_RPC_URL || "https://peaq-rpc.publicnode.com";
 // BNB Smart Chain (BSC, chain ID 56) -- same eth_* JSON-RPC interface as
-// Ethereum/peaq above, since BSC is EVM-compatible. Public default endpoint;
-// swap in a private/paid RPC if volume grows. (Data-source layer only -- see
-// x402Middleware.js for the separate, NOT-YET-ACTIVE work needed before BSC
-// can be offered as a *payment* network too.)
+// Ethereum/peaq above, since BSC is EVM-compatible. Also on POKT's public
+// gateway (bsc.api.pocket.network) if this gets swapped over later -- left
+// on its previous default for now since only ETH/SOL were reviewed and
+// approved for the POKT swap. Swap in a private/paid RPC if volume grows.
+// (Data-source layer only -- see x402Middleware.js for the separate,
+// NOT-YET-ACTIVE work needed before BSC can be offered as a *payment* network too.)
 const BSC_RPC_URL = process.env.BSC_RPC_URL || "https://bsc-dataseed.binance.org";
-// If you stake POKT and run a gateway, point ETH_RPC_URL / SOL_RPC_URL at your
-// POKT gateway endpoint instead of the public defaults above -- same interface,
-// you just become the infra layer instead of renting someone else's.
+// If POKT's free public gateway's fair-use limit (~15-25 req/s) is ever
+// outgrown, self-hosting PATH (Pocket's own gateway framework) is the
+// documented next step -- published per-chain CU pricing, same JSON-RPC
+// interface, just point ETH_RPC_URL / SOL_RPC_URL at your own gateway.
 
 async function rpcCall(url, method, params = []) {
   const res = await fetch(url, {

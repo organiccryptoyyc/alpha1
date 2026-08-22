@@ -46,6 +46,7 @@ import {
   getAgentReputation,
   getEthLogs,
   getStablecoinDepeg,
+  getYieldAggregation,
   getSolTransactionHistory,
   getSanctionsCheck,
   getCurrencyConversion,
@@ -766,6 +767,19 @@ app.get("/v1/stablecoin/depeg-check", async (req, res, next) => {
     const { symbols, thresholdPct } = req.query;
     const cacheKey = `stablecoin:depeg:${symbols || "all"}:${thresholdPct || ""}`;
     res.json(await cached(cacheKey, 60, () => getStablecoinDepeg({ symbols, thresholdPct })));
+  } catch (err) {
+    next(err);
+  }
+});
+
+// DeFi/staking yield aggregation (2026-08-22). $0.01-0.02/call (network-dependent
+// via multiNetworkAccepts). 10min cache -- DefiLlama's own pool snapshot doesn't
+// refresh faster than that, so polling more often than this just re-serves stale data.
+app.get("/v1/defi/yields", async (req, res, next) => {
+  try {
+    const { chain, project, symbol, stablecoinOnly, minTvlUsd, sortBy, limit, includeOutliers } = req.query;
+    const cacheKey = `defi:yields:${chain || ""}:${project || ""}:${symbol || ""}:${stablecoinOnly || ""}:${minTvlUsd || ""}:${sortBy || ""}:${limit || ""}:${includeOutliers || ""}`;
+    res.json(await cached(cacheKey, 600, () => getYieldAggregation({ chain, project, symbol, stablecoinOnly, minTvlUsd, sortBy, limit, includeOutliers })));
   } catch (err) {
     next(err);
   }

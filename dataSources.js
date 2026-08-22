@@ -663,6 +663,148 @@ export async function getProtocolHealth({ protocol: protocolRaw, chain: chainRaw
   };
 }
 
+// --- NFT collection analytics (2026-08-22) ---------------------------------
+// Day 5 of the 2026-08-22 roadmap. The original plan called for two upstreams
+// (CoinGecko NFT API + Magic Eden API) normalized across chains, but
+// CoinGecko's own /nfts/{id} endpoint already returns floor price, market
+// cap, 24h volume, unique-holder counts, total supply, multi-timeframe floor
+// change, and a cross-collection market-cap rank -- for collections on
+// Ethereum, Solana, Polygon, and every other chain CoinGecko tracks, all from
+// one free, keyless call. Adding Magic Eden on top would only duplicate
+// Solana-specific fields CoinGecko already covers, so this ships single-
+// upstream (consistent with the discipline applied to seller-trust's known
+// Bazaar-discovery incident: fewer moving parts, fewer failure modes).
+// Verified live 2026-08-22: both slug lookup (/nfts/{id}) and contract
+// lookup (/nfts/{platform}/contract/{address}) work keyless; CoinGecko's
+// public tier rate-limits aggressively (429s after ~4 rapid calls in
+// testing), so this is a single fetch per request, relying on the route's
+// own cache layer to avoid hammering it.
+const NFT_DETAIL_BY_ID_URL = (id) => `https://api.coingecko.com/api/v3/nfts/${encodeURIComponent(id)}`;
+const NFT_DETAIL_BY_CONTRACT_URL = (platform, contract) => `https://api.coingecko.com/api/v3/nfts/${encodeURIComponent(platform)}/contract/${encodeURIComponent(contract)}`;
+
+function scoreNftCollectionHealth({ marketCapUsd, floorChange7d, volumeToMcap, holderRatio, marketCapRank }) {
+  let score = 0;
+  const reasons = [];
+
+  // Scale: bigger market caps signal more established collections (up to 25).
+  let scalePts = 0;
+  if (marketCapUsd != null) {
+    if (marketCapUsd >= 1e8) scalePts = 25;
+    else if (marketCapUsd >= 1e7) scalePts = 18;
+    else if (marketCapUsd >= 1e6) scalePts = 10;
+    else if (marketCapUsd >= 1e5) scalePts = 5;
+  }
+  score += scalePts;
+  reasons.push(marketCapUsd == null ? "no market cap data (+0)" : `market cap ~$${Math.round(marketCapUsd).toLocaleString()} (+${scalePts})`);
+
+  // Momentum: floor price trend over 7 days (up to 20).
+  let momentumPts;
+  if (floorChange7d == null) momentumPts = 0;
+  else if (floorChange7d >= 10) momentumPts = 20;
+  else if (floorChange7d >= 0) momentumPts = 12;
+  else if (floorChange7d >= -10) momentumPts = 5;
+  else momentumPts = 0;
+  score += momentumPts;
+  reasons.push(floorChange7d == null ? "no 7d floor change data (+0)" : `floor price change 7d ${floorChange7d.toFixed(1)}% (+${momentumPts})`);
+
+  // Liquidity: 24h volume as a share of market cap -- daily turnover (up to 25).
+  let liqPts = 0;
+  if (volumeToMcap != null) {
+    if (volumeToMcap >= 0.05) liqPts = 25;
+    else if (volumeToMcap >= 0.01) liqPts = 18;
+    else if (volumeToMcap >= 0.001) liqPts = 10;
+    else if (volumeToMcap > 0) liqPts = 5;
+  }
+  score += liqPts;
+  reasons.push(volumeToMcap == null ? "no volume/mcap data (+0)" : `24h volume/mcap turnover ${(volumeToMcap * 100).toFixed(2)}% (+${liqPts})`);
+
+  // Distribution: unique holders relative to supply -- more distributed
+  // ownership reduces single-whale dump risk (up to 15).
+  let distPts = 0;
+  if (holderRatio != null) {
+    if (holderRatio >= 0.5) distPts = 15;
+    else if (holderRatio >= 0.3) distPts = 10;
+    else if (holderRatio >= 0.15) distPts = 5;
+  }
+  score += distPts;
+  reasons.push(holderRatio == null ? "no holder distribution data (+0)" : `${(holderRatio * 100).toFixed(1)}% of supply held by unique addresses (+${distPts})`);
+
+  // Prominence: CoinGecko's own cross-collection market cap ranking (up to 15).
+  let rankPts = 0;
+  if (marketCapRank != null) {
+    if (marketCapRank <= 50) rankPts = 15;
+    else if (marketCapRank <= 200) rankPts = 10;
+    else if (marketCapRank <= 1000) rankPts = 5;
+  }
+  score += rankPts;
+  reasons.push(marketCapRank == null ? "unranked (+0)" : `market cap rank #${marketCapRank} (+${rankPts})`);
+
+  score = Math.max(0, Math.min(100, score));
+  let verdict;
+  if (score >= 80) verdict = "blue-chip";
+  else if (score >= 55) verdict = "established";
+  else if (score >= 30) verdict = "speculative";
+  else verdict = "illiquid";
+
+  return { score, verdict, reasons };
+}
+
+export async function getNftCollectionAnalytics({ collection: collectionRaw, contractAddress: contractRaw, chain: chainRaw } = {}) {
+  const collectionId = collectionRaw ? String(collectionRaw).trim().toLowerCase() : null;
+  const contract = contractRaw ? String(contractRaw).trim() : null;
+  const platform = chainRaw ? String(chainRaw).trim().toLowerCase() : null;
+  if (!collectionId && !(contract && platform)) {
+    throw new Error("collection (CoinGecko NFT id/slug) or contractAddress+chain is required");
+  }
+
+  const url = collectionId ? NFT_DETAIL_BY_ID_URL(collectionId) : NFT_DETAIL_BY_CONTRACT_URL(platform, contract);
+  const res = await fetch(url);
+  if (res.status === 404) throw new Error(`no NFT collection matched "${collectionId || contract}"`);
+  if (res.status === 429) throw new Error("CoinGecko NFT API rate-limited this request -- retry shortly");
+  if (!res.ok) throw new Error(`CoinGecko NFT lookup failed: HTTP ${res.status}`);
+  const data = await res.json();
+
+  const marketCapUsd = data.market_cap?.usd ?? null;
+  const floorPriceUsd = data.floor_price?.usd ?? null;
+  const volume24hUsd = data.volume_24h?.usd ?? null;
+  const floorChange24h = data.floor_price_24h_percentage_change?.usd ?? null;
+  const floorChange7d = data.floor_price_7d_percentage_change?.usd ?? null;
+  const floorChange30d = data.floor_price_30d_percentage_change?.usd ?? null;
+  const uniqueHolders = data.number_of_unique_addresses ?? null;
+  const totalSupply = data.total_supply ?? null;
+  const marketCapRank = data.market_cap_rank ?? null;
+  const oneDaySales = data.one_day_sales ?? null;
+
+  const volumeToMcap = (volume24hUsd != null && marketCapUsd) ? volume24hUsd / marketCapUsd : null;
+  const holderRatio = (uniqueHolders != null && totalSupply) ? uniqueHolders / totalSupply : null;
+
+  const health = scoreNftCollectionHealth({ marketCapUsd, floorChange7d, volumeToMcap, holderRatio, marketCapRank });
+
+  return {
+    source: "coingecko-nft-analytics",
+    collectionId: data.id,
+    name: data.name,
+    chain: data.asset_platform_id,
+    contractAddress: data.contract_address,
+    floorPriceUsd,
+    floorChange24hPct: floorChange24h,
+    floorChange7dPct: floorChange7d,
+    floorChange30dPct: floorChange30d,
+    marketCapUsd,
+    marketCapRank,
+    volume24hUsd,
+    volumeToMcapRatio: volumeToMcap,
+    totalSupply,
+    uniqueHolders,
+    holderRatio,
+    oneDaySales,
+    healthScore: health.score,
+    verdict: health.verdict,
+    scoringReasons: health.reasons,
+    fetchedAt: new Date().toISOString(),
+  };
+}
+
 // --- POKT Shannon service-demand snapshot ---------------------------------
 // Sourced live from Pocket Network's public GraphQL indexer (Pocketdex).
 // This is deliberately NOT a price/RPC pass-through like everything above --

@@ -45,6 +45,7 @@ import {
   getWebSearch,
   getAgentReputation,
   getEthLogs,
+  getStablecoinDepeg,
   getSolTransactionHistory,
   getSanctionsCheck,
   getCurrencyConversion,
@@ -749,10 +750,22 @@ app.get("/v1/agent/reputation/:agentId", async (req, res, next) => {
 // range query, not a single latest-block read).
 app.get("/v1/eth/logs", async (req, res, next) => {
   try {
-    const { address, topic0, blocks } = req.query;
+    const { address, topic0, blocks, decimals, tokenUsdPrice, minUsd } = req.query;
     if (!address) return res.status(400).json({ error: "address query param is required" });
-    const cacheKey = `eth:logs:${address}:${topic0 || ""}:${blocks || ""}`;
-    res.json(await cached(cacheKey, 15, () => getEthLogs(address, { topic0, blocks })));
+    const cacheKey = `eth:logs:${address}:${topic0 || ""}:${blocks || ""}:${decimals || ""}:${tokenUsdPrice || ""}:${minUsd || ""}`;
+    res.json(await cached(cacheKey, 15, () => getEthLogs(address, { topic0, blocks, decimals, tokenUsdPrice, minUsd })));
+  } catch (err) {
+    next(err);
+  }
+});
+
+// Stablecoin depeg monitor (2026-08-22). $0.01/call. 60s cache -- price
+// checks don't need eth/logs-level freshness.
+app.get("/v1/stablecoin/depeg-check", async (req, res, next) => {
+  try {
+    const { symbols, thresholdPct } = req.query;
+    const cacheKey = `stablecoin:depeg:${symbols || "all"}:${thresholdPct || ""}`;
+    res.json(await cached(cacheKey, 60, () => getStablecoinDepeg({ symbols, thresholdPct })));
   } catch (err) {
     next(err);
   }

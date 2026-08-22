@@ -1,7 +1,7 @@
 {
   "name": "puppeteer-render",
   "version": "0.1.0",
-  "description": "Internal-only headless-Chrome rendering service backing GET /v1/render/screenshot -- not reachable outside the docker network.",
+  "description": "Internal-only headless-Chrome rendering + OCR service backing GET /v1/render/screenshot, /v1/render/pdf, and /v1/image/ocr -- not reachable outside the docker network.",
   "type": "module",
   "main": "puppeteer-render.js",
   "scripts": {
@@ -10,7 +10,8 @@
   },
   "dependencies": {
     "express": "^4.19.2",
-    "puppeteer-core": "^23.0.0"
+    "puppeteer-core": "^23.0.0",
+    "tesseract.js": "^5.1.1"
   },
   "engines": {
     "node": ">=20"

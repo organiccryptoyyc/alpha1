@@ -47,6 +47,9 @@ import {
   getEthLogs,
   getSolTransactionHistory,
   getSanctionsCheck,
+  getCurrencyConversion,
+  getPuppeteerPdf,
+  getImageOcr,
 } from "./dataSources.js";
 
 const app = express();
@@ -780,6 +783,47 @@ app.get("/v1/compliance/sanctions-check/:address", async (req, res, next) => {
     const { address } = req.params;
     const { chain } = req.query;
     res.json(await getSanctionsCheck(address, { chain }));
+  } catch (err) {
+    next(err);
+  }
+});
+
+
+// Currency conversion (ECB reference rates via Frankfurter, free/keyless
+// upstream -- 2026-08-22). $0.01/call. 3600s cache -- ECB rates only
+// update once daily, so an hour-long cache costs no real accuracy.
+app.get("/v1/currency/convert", async (req, res, next) => {
+  try {
+    const { from, to, amount } = req.query;
+    if (!from || !to) return res.status(400).json({ error: "from and to query params are required" });
+    const cacheKey = `currency:convert:${String(from).toUpperCase()}:${String(to).toUpperCase()}:${amount || 1}`;
+    res.json(await cached(cacheKey, 3600, () => getCurrencyConversion(from, to, amount)));
+  } catch (err) {
+    next(err);
+  }
+});
+
+// Webpage-to-PDF render, via the puppeteer-render service (2026-08-22).
+// $0.01/call. 30s cache -- same rationale as render/screenshot below.
+app.get("/v1/render/pdf", async (req, res, next) => {
+  try {
+    const { url, format, landscape } = req.query;
+    if (!url) return res.status(400).json({ error: "url query param is required" });
+    const cacheKey = `render:pdf:${url}:${format || "Letter"}:${landscape ? "landscape" : "portrait"}`;
+    res.json(await cached(cacheKey, 30, () => getPuppeteerPdf(url, { format, landscape: landscape === "true" })));
+  } catch (err) {
+    next(err);
+  }
+});
+
+// Image OCR (Tesseract, via the puppeteer-render service -- 2026-08-22).
+// $0.01/call. 60s cache -- same source image OCR'd twice inside that window
+// is free margin instead of a repeat Tesseract pass.
+app.get("/v1/image/ocr", async (req, res, next) => {
+  try {
+    const { url } = req.query;
+    if (!url) return res.status(400).json({ error: "url query param is required" });
+    res.json(await cached(`image:ocr:${url}`, 60, () => getImageOcr(url)));
   } catch (err) {
     next(err);
   }

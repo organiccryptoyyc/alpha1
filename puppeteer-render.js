@@ -39,6 +39,7 @@
 
 import express from "express";
 import puppeteer from "puppeteer-core";
+import { createWorker } from "tesseract.js";
 
 const PORT = process.env.PORT || 3002;
 const EXECUTABLE_PATH = process.env.PUPPETEER_EXECUTABLE_PATH || "/usr/bin/chromium-browser";
@@ -121,6 +122,72 @@ app.post("/screenshot", async (req, res) => {
     res.status(502).json({ error: `render failed: ${err.message}` });
   } finally {
     if (page) await page.close().catch(() => {});
+    releaseSlot();
+  }
+});
+
+app.post("/pdf", async (req, res) => {
+  const { url, format, landscape } = req.body || {};
+  if (!url) return res.status(400).json({ error: "url is required" });
+
+  await acquireSlot();
+  let page;
+  try {
+    const b = await ensureBrowser();
+    page = await b.newPage();
+    await page.setViewport(VIEWPORT);
+    const response = await page.goto(url, {
+      waitUntil: "networkidle2",
+      timeout: NAV_TIMEOUT_MS,
+    });
+    const buffer = await page.pdf({
+      format: format || "Letter",
+      landscape: !!landscape,
+      printBackground: true,
+    });
+    res.json({
+      statusCode: response ? response.status() : null,
+      format: format || "Letter",
+      pdfBase64: buffer.toString("base64"),
+    });
+  } catch (err) {
+    console.error("[puppeteer-render] pdf render failed:", err.message);
+    res.status(502).json({ error: `pdf render failed: ${err.message}` });
+  } finally {
+    if (page) await page.close().catch(() => {});
+    releaseSlot();
+  }
+});
+
+// OCR worker: lazily created on first request and kept alive, same pattern
+// as ensureBrowser() above -- creating a fresh Tesseract worker per request
+// would dominate OCR time. Reuses the same acquireSlot()/releaseSlot()
+// semaphore as Chrome pages above as a simple, single concurrency guard for
+// this container's real CPU/RAM work, even though OCR isn't a Chrome page.
+let ocrWorker = null;
+async function ensureOcrWorker() {
+  if (ocrWorker) return ocrWorker;
+  ocrWorker = await createWorker("eng");
+  return ocrWorker;
+}
+
+app.post("/ocr", async (req, res) => {
+  const { imageBase64 } = req.body || {};
+  if (!imageBase64) return res.status(400).json({ error: "imageBase64 is required" });
+
+  await acquireSlot();
+  try {
+    const worker = await ensureOcrWorker();
+    const buffer = Buffer.from(imageBase64, "base64");
+    const { data } = await worker.recognize(buffer);
+    res.json({
+      text: data.text,
+      confidence: data.confidence,
+    });
+  } catch (err) {
+    console.error("[puppeteer-render] ocr failed:", err.message);
+    res.status(502).json({ error: `ocr failed: ${err.message}` });
+  } finally {
     releaseSlot();
   }
 });

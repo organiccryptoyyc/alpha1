@@ -724,6 +724,40 @@ via the spec's `routing.auth` block; submit the deployed pay.sh gateway URL
 through pay.sh's "List your API" form. None of that is required for the
 existing public `/v1/*` catalog or Bazaar listing -- this is purely additive.
 
+**Status (2026-08-22): paused here, pick up at step 5 of the deployment guide.** Steps 1-4 of `paysh-gateway-vercel-deployment-guide.md` (Vercel CLI install/login, operator keypair generation, funding it with SOL, generating `PAY_MPP_CHALLENGE_SECRET`/choosing `PAY_RPC_URL`) have NOT been executed yet -- this got shelved to build three new public routes (currency conversion, webpage-to-PDF, image OCR) instead. Nothing about that other work touches this: `paysh-provider.yml`, `Dockerfile.vercel`, and the `/internal/paysh/*` routes are all still in place, unchanged, ready to resume from step 5 (`git clone` + `vercel link`) whenever this is picked back up.
+
+## New utility routes: currency conversion, webpage-to-PDF, image OCR (2026-08-22)
+
+Three new routes, all priced at **$0.01/call** -- a deliberate undercut of the
+~$0.02 median found on live Bazaar comparables researched the same day, to
+take share in categories with real (if early) proven demand rather than
+match the market rate.
+
+- **`GET /v1/currency/convert`** -- ECB daily reference rates via
+  [Frankfurter](https://frankfurter.dev), a free/keyless upstream (no API
+  key, no per-call credit cost -- same "own the margin" pattern as
+  `search/web`'s self-hosted SearXNG). Comparables researched: Otto AI
+  ($0.01, 35 calls/22 payers -- the highest payer-density signal found in
+  this category), NetIntel ($0.10, 136 calls/6 payers), Vibe Springs
+  ($0.02, 130 calls/7 payers).
+- **`GET /v1/render/pdf`** -- webpage-to-PDF, via the existing
+  `puppeteer-render` container (same headless-Chrome service backing
+  `render/screenshot`; this just adds a second endpoint using Puppeteer's
+  `page.pdf()`, no new container). Closest comparable: Relaystation's
+  URL-to-PDF at $0.02/render, 29 calls/30d, 1 payer -- a real but still
+  early niche.
+- **`GET /v1/image/ocr`** -- Tesseract OCR on an image URL, also added to
+  the `puppeteer-render` container (isolated from the main API process for
+  the same CPU/RAM-isolation reason as the screenshot/PDF routes) rather
+  than a new one. Comparables researched: mostly $0.05-0.10/call for
+  scanned-PDF OCR; the plain-image-OCR niche is thinner but growing (newest
+  entrant found already at 11 calls/2 payers within its first month).
+
+All three reuse this file's existing `isBlockedTarget()` SSRF denylist
+(currency conversion takes no URL, so it doesn't need it) and existing
+`cached()` helper -- no new caching or security infrastructure, same
+pattern as every route added since `render/screenshot`.
+
 ## Routes and pricing
 
 | Route | Price | What it returns |

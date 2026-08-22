@@ -48,6 +48,7 @@ import {
   getStablecoinDepeg,
   getYieldAggregation,
   getProtocolHealth,
+  getNftCollectionAnalytics,
   getSolTransactionHistory,
   getSanctionsCheck,
   getCurrencyConversion,
@@ -795,6 +796,23 @@ app.get("/v1/protocol/health", async (req, res, next) => {
     if (!protocol && !chain) return res.status(400).json({ error: "protocol or chain query param is required" });
     const cacheKey = `protocol:health:${protocol || ""}:${chain || ""}`;
     res.json(await cached(cacheKey, 600, () => getProtocolHealth({ protocol, chain })));
+  } catch (err) {
+    next(err);
+  }
+});
+
+// NFT collection analytics (2026-08-22). $0.015/call (network-dependent via
+// multiNetworkAccepts). 5min cache -- floor/volume data moves faster than
+// TVL-style metrics, so this is shorter than defi/yields' and
+// protocol/health's 10min TTL.
+app.get("/v1/nft/analytics", async (req, res, next) => {
+  try {
+    const { collection, contractAddress, chain } = req.query;
+    if (!collection && !(contractAddress && chain)) {
+      return res.status(400).json({ error: "collection or contractAddress+chain query param is required" });
+    }
+    const cacheKey = `nft:analytics:${collection || ""}:${contractAddress || ""}:${chain || ""}`;
+    res.json(await cached(cacheKey, 300, () => getNftCollectionAnalytics({ collection, contractAddress, chain })));
   } catch (err) {
     next(err);
   }

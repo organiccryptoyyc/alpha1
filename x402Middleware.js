@@ -1224,6 +1224,23 @@ export const routes = {
       },
     }),
   },
+  "GET /v1/nft/analytics": {
+    accepts: multiNetworkAccepts(0.015),
+    description: "Composite 0-100 health score for an NFT collection (by CoinGecko id/slug, or by contract address + chain): market cap scale, 7d floor-price momentum, 24h volume/mcap liquidity, holder-distribution ratio, and cross-collection market-cap rank, sourced live from CoinGecko's free NFT API across every chain it tracks (Ethereum, Solana, Polygon, and more).",
+    extensions: declareDiscoveryExtension({
+      input: { collection: "azuki" },
+      inputSchema: {
+        properties: {
+          collection: { type: "string", description: "CoinGecko NFT id/slug, e.g. 'azuki', 'degods', 'okay-bears' (primary lookup mode)" },
+          contractAddress: { type: "string", description: "NFT contract address -- use with chain instead of collection when the slug is unknown" },
+          chain: { type: "string", description: "Chain for contractAddress lookup, e.g. 'ethereum', 'solana' (ignored if collection is set)" },
+        },
+      },
+      output: {
+        example: { source: "coingecko-nft-analytics", healthScore: 62, verdict: "established" },
+      },
+    }),
+  },
 };
 
 export function buildX402Middleware() {

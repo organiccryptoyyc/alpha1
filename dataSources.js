@@ -320,6 +320,58 @@ export async function getTokenPrice(symbol) {
   };
 }
 
+// --- Stablecoin depeg monitor (2026-08-22) ---------------------------------
+// First full new build off the 2026-08-22 difficulty-ranked roadmap. Checks
+// major stablecoins against their $1.00 peg using CoinGecko's free, keyless
+// price endpoint (same one getTokenPrice() above already uses) -- useful
+// for risk/treasury-monitoring agents that don't want to poll multiple
+// exchanges themselves to catch a depeg event.
+const STABLECOIN_IDS = {
+  usdt: "tether",
+  usdc: "usd-coin",
+  dai: "dai",
+  frax: "frax",
+  tusd: "true-usd",
+  usdp: "paxos-standard",
+  fdusd: "first-digital-usd",
+  pyusd: "paypal-usd",
+};
+const DEPEG_DEFAULT_THRESHOLD_PCT = 0.5;
+
+export async function getStablecoinDepeg({ symbols: symbolsRaw, thresholdPct: thresholdPctRaw } = {}) {
+  const requested = (symbolsRaw ? String(symbolsRaw).split(",") : Object.keys(STABLECOIN_IDS))
+    .map((s) => s.trim().toLowerCase())
+    .filter(Boolean);
+  const symbols = requested.filter((s) => STABLECOIN_IDS[s]);
+  const unknownSymbols = requested.filter((s) => !STABLECOIN_IDS[s]);
+  if (symbols.length === 0) {
+    throw new Error(`no recognized stablecoin symbols; supported: ${Object.keys(STABLECOIN_IDS).join(", ")}`);
+  }
+  const thresholdPct = Math.max(0.05, Math.min(10, Number(thresholdPctRaw) || DEPEG_DEFAULT_THRESHOLD_PCT));
+  const ids = symbols.map((s) => STABLECOIN_IDS[s]);
+  const res = await fetch(`https://api.coingecko.com/api/v3/simple/price?ids=${ids.join(",")}&vs_currencies=usd`);
+  if (!res.ok) throw new Error(`CoinGecko failed: HTTP ${res.status}`);
+  const json = await res.json();
+  const coins = symbols.map((symbol) => {
+    const id = STABLECOIN_IDS[symbol];
+    const price = json[id]?.usd ?? null;
+    if (price === null) {
+      return { symbol, id, price: null, deviationPct: null, depegged: null, error: "price unavailable" };
+    }
+    const deviationPct = Math.round((price - 1) * 10000) / 100;
+    return { symbol, id, price, deviationPct, depegged: Math.abs(deviationPct) >= thresholdPct };
+  });
+  return {
+    source: "coingecko-stablecoin-depeg",
+    thresholdPct,
+    coins,
+    anyDepegged: coins.some((c) => c.depegged),
+    unknownSymbols: unknownSymbols.length ? unknownSymbols : undefined,
+    supportedSymbols: Object.keys(STABLECOIN_IDS),
+    fetchedAt: new Date().toISOString(),
+  };
+}
+
 // --- POKT Shannon service-demand snapshot ---------------------------------
 // Sourced live from Pocket Network's public GraphQL indexer (Pocketdex).
 // This is deliberately NOT a price/RPC pass-through like everything above --
@@ -1001,6 +1053,32 @@ export async function getUprockVerify(domain, { regions } = {}) {
 // gets a judgment call -- "is this site live, performant, and hosted where
 // it claims to be" -- not three raw data dumps to interpret themselves.
 // ---------------------------------------------------------------------------
+// Tranco (tranco-list.eu) -- free, keyless, no-auth top-1M domain ranking
+// combining Cisco Umbrella/Majestic/Cloudflare Radar/Chrome UX Report data,
+// updated daily. Folded into brand_verify as one more composite signal
+// rather than shipped as its own route (per 2026-08-22 roadmap note).
+// Purely informational here -- does not currently move trustScore, since
+// scoreBrandVerify()'s four existing pillars already sum to 100.
+const TRANCO_LOOKUP_TIMEOUT_MS = 5000;
+async function getTrancoRank(domain) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), TRANCO_LOOKUP_TIMEOUT_MS);
+  try {
+    const res = await fetch(`https://tranco-list.eu/api/ranks/domain/${encodeURIComponent(domain)}`, { signal: controller.signal });
+    if (!res.ok) return { available: false, rank: null, asOf: null, error: `Tranco returned HTTP ${res.status}` };
+    const json = await res.json();
+    const ranks = Array.isArray(json?.ranks) ? json.ranks : [];
+    if (ranks.length === 0) {
+      return { available: false, rank: null, asOf: null, error: null, note: "not in Tranco's top 1M for the past 30 days" };
+    }
+    return { available: true, rank: ranks[0].rank, asOf: ranks[0].date, error: null };
+  } catch (err) {
+    return { available: false, rank: null, asOf: null, error: err.name === "AbortError" ? "timeout" : err.message };
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
 function scoreBrandVerify({ verify, geo, dnsError }) {
     let score = 0;
     const reasons = [];
@@ -1075,8 +1153,9 @@ export async function getBrandVerify(domain, { regions } = {}) {
           dnsError = err.message;
     }
 
-  const [verifyResult, geoResult] = await Promise.allSettled([
+  const [verifyResult, geoResult, trancoResult] = await Promise.allSettled([
         getUprockVerify(trimmed, { regions }),
+        getTrancoRank(trimmed),
         resolvedIp ? getIpGeolocation(resolvedIp) : Promise.resolve(null),
       ]);
 
@@ -1084,6 +1163,7 @@ export async function getBrandVerify(domain, { regions } = {}) {
     const verifyError = verifyResult.status === "rejected" ? verifyResult.reason?.message : null;
     const geo = geoResult.status === "fulfilled" ? geoResult.value : null;
     const geoError = geoResult.status === "rejected" ? geoResult.reason?.message : null;
+  const tranco = trancoResult.status === "fulfilled" ? trancoResult.value : { available: false, rank: null, asOf: null, error: trancoResult.reason?.message };
 
   const trust = scoreBrandVerify({ verify, geo, dnsError });
 
@@ -1099,6 +1179,7 @@ export async function getBrandVerify(domain, { regions } = {}) {
         verificationError: verifyError,
         ipIntelligence: geo,
         ipIntelligenceError: geoError,
+        domainAuthority: tranco,
         fetchedAt: new Date().toISOString(),
   };
 }
@@ -1402,6 +1483,26 @@ async function probeSellerResource(url) {
   }
 }
 
+// Bazaar's accepts[] amounts are atomic USDC (6 decimals) on every network
+// this project uses (see BAZAAR_SEARCH_URL usage above) -- this turns raw
+// call counts into an approximate settled-USD figure, a much more direct
+// "is this seller actually making money" signal than call count alone.
+// Approximate only: assumes the advertised price was paid in full for
+// every call and doesn't account for refunds/partial payments.
+function computeApproxSettledUsd30d(routes) {
+  let total = 0;
+  for (const r of routes) {
+    const calls = r.quality?.l30DaysTotalCalls || 0;
+    if (calls <= 0) continue;
+    const accepts = Array.isArray(r.accepts) ? r.accepts : [];
+    const usdcAccept = accepts.find((a) => a?.extra?.name === "USDC") || accepts[0];
+    const amount = usdcAccept ? Number(usdcAccept.amount) : NaN;
+    if (!Number.isFinite(amount)) continue;
+    total += (amount / 1e6) * calls;
+  }
+  return Math.round(total * 100) / 100;
+}
+
 function scoreX402SellerTrust({ bazaar, manifest, probeResults, dnsError, geo }) {
   if (!bazaar.matched && !manifest.found) {
     return {
@@ -1566,6 +1667,7 @@ export async function getX402SellerTrust(baseUrl) {
     trustScore: trust.score,
     verdict: trust.verdict,
     scoringReasons: trust.reasons,
+    approxSettledUsd30d: computeApproxSettledUsd30d(bazaar.routes),
     fetchedAt: new Date().toISOString(),
   };
 }
@@ -2233,7 +2335,7 @@ async function fetchEthLogsWithNarrowing(baseFilter, fromBlock, toBlock) {
   throw lastErr;
 }
 
-export async function getEthLogs(addressRaw, { topic0: topic0Raw, blocks: blocksRaw } = {}) {
+export async function getEthLogs(addressRaw, { topic0: topic0Raw, blocks: blocksRaw, decimals: decimalsRaw, tokenUsdPrice: tokenUsdPriceRaw, minUsd: minUsdRaw } = {}) {
   const address = String(addressRaw || "").trim();
   if (!/^0x[a-fA-F0-9]{40}$/.test(address)) {
     throw new Error("address must be a 0x-prefixed 20-byte Ethereum address");
@@ -2253,6 +2355,18 @@ export async function getEthLogs(addressRaw, { topic0: topic0Raw, blocks: blocks
   const blocksRequested = Number(blocksRaw) || 500;
   const blocksSearched = Math.max(1, Math.min(Math.trunc(blocksRequested), ETH_LOGS_MAX_BLOCKS));
 
+  // Optional whale-transfer filter, folded into this existing route rather
+  // than shipped as a new one (2026-08-22 roadmap note) -- decodes a
+  // standard single-uint256 event value (e.g. ERC-20 Transfer's `value`)
+  // from each log's data field. Caller supplies decimals + a USD price
+  // since this route deliberately doesn't guess either (different tokens,
+  // different decimals, and this project doesn't want to silently mislabel
+  // a price). No tokenUsdPrice -> no USD figures, no filtering; unchanged
+  // behavior from before this field existed.
+  const decimals = Math.max(0, Math.min(36, Math.trunc(Number(decimalsRaw)) || 18));
+  const tokenUsdPrice = Number(tokenUsdPriceRaw) > 0 ? Number(tokenUsdPriceRaw) : null;
+  const minUsd = Number(minUsdRaw) > 0 ? Number(minUsdRaw) : null;
+
   const latestHex = await rpcCall(ETH_RPC_URL, "eth_blockNumber");
   const latest = parseInt(latestHex, 16);
   const fromBlock = Math.max(0, latest - blocksSearched);
@@ -2268,15 +2382,39 @@ export async function getEthLogs(addressRaw, { topic0: topic0Raw, blocks: blocks
   const narrowedDueToActivity = actualFromBlock !== fromBlock || actualToBlock !== latest;
 
   const truncated = rawLogs.length > ETH_LOGS_MAX_RESULTS;
-  const logs = rawLogs.slice(0, ETH_LOGS_MAX_RESULTS).map((l) => ({
-    address: l.address,
-    topics: l.topics,
-    data: l.data,
-    blockNumber: parseInt(l.blockNumber, 16),
-    transactionHash: l.transactionHash,
-    logIndex: parseInt(l.logIndex, 16),
-    removed: !!l.removed,
-  }));
+  let logs = rawLogs.slice(0, ETH_LOGS_MAX_RESULTS).map((l) => {
+    let decodedValueRaw = null;
+    let decodedTokenAmount = null;
+    let estimatedUsd = null;
+    if (l.data && l.data !== "0x") {
+      try {
+        const bi = BigInt(l.data);
+        decodedValueRaw = bi.toString();
+        decodedTokenAmount = Number(bi) / 10 ** decimals;
+        if (tokenUsdPrice) estimatedUsd = Math.round(decodedTokenAmount * tokenUsdPrice * 100) / 100;
+      } catch {
+        // data isn't a plain single-uint256 value (e.g. a log with no non-indexed
+        // params, or a multi-word payload) -- leave decoded fields null rather
+        // than guess.
+      }
+    }
+    return {
+      address: l.address,
+      topics: l.topics,
+      data: l.data,
+      blockNumber: parseInt(l.blockNumber, 16),
+      transactionHash: l.transactionHash,
+      logIndex: parseInt(l.logIndex, 16),
+      removed: !!l.removed,
+      decodedValueRaw,
+      decodedTokenAmount,
+      estimatedUsd,
+    };
+  });
+  const whaleFilterApplied = Boolean(minUsd && tokenUsdPrice);
+  if (whaleFilterApplied) {
+    logs = logs.filter((l) => l.estimatedUsd !== null && l.estimatedUsd >= minUsd);
+  }
 
   return {
     source: "eth-logs",
@@ -2288,6 +2426,10 @@ export async function getEthLogs(addressRaw, { topic0: topic0Raw, blocks: blocks
     blocksSearched: actualToBlock - actualFromBlock,
     blocksRequested: blocksSearched,
     narrowedDueToActivity,
+    decimalsUsed: decimals,
+    tokenUsdPriceUsed: tokenUsdPrice,
+    minUsdThreshold: minUsd,
+    whaleFilterApplied,
     logCount: logs.length,
     truncated,
     logs,

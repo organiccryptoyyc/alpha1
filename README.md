@@ -33,6 +33,49 @@ watch actual usage, adjust price and add routes based on what agents actually
 query, and only invest in your own RPC infrastructure (see the POKT note
 below) once volume justifies it.
 
+## Status summary & version log
+
+**Current backup: `v1u`** (branch `backup/verified-working-2026-08-23-v1u`, the
+21st verified-working snapshot of this repo). Full history:
+`backup/verified-working-2026-08-08` through
+`backup/verified-working-2026-08-23-round12-yield-opportunities` (20 branches,
+one per shipped round). Starting with this one, backups also carry a short
+`v1<letter>` tag -- one letter per verified-working snapshot, `a` through `z`,
+then `v2.0a` through `v2.0z`, and so on if this project outlives the alphabet.
+
+**Live and confirmed in production as of 2026-08-23:** 45 metered routes.
+`/.well-known/x402` on the deployed API is the always-current, authoritative
+list -- the pricing table further down this README is illustrative, not
+exhaustive (it predates most of the routes below). Every dated section in
+this README shipped, was pushed to `main`, redeployed via Portainer, and
+live-payment-tested against the production URL before being marked done.
+Most recent: the yield/staking opportunity recommender (three routes --
+EVM, Solana, and a combined bundle -- $0.25/$0.25/$0.30, see
+"Yield/staking opportunity recommender" below).
+
+**Not complete: the pay.sh listing.** The proxy-route plumbing
+(`/internal/paysh/*` in `server.js`, `paysh-provider.yml`,
+`Dockerfile.vercel`, the `PAYSH_INTERNAL_KEY` shared-secret gate) has been in
+place and unchanged since 2026-08-19 -- see "pay.sh listing: internal proxy
+routes" below. The pay.sh gateway itself has never been deployed: Vercel CLI
+install/login, operator keypair generation and funding,
+`PAY_MPP_CHALLENGE_SECRET`/`PAY_RPC_URL` setup, `vercel link` + deploy, and
+submitting the deployed gateway URL through pay.sh's "List your API" form are
+all still outstanding (steps 1-5 of the deployment guide). Nine build rounds
+have shipped since 2026-08-19 -- currency/PDF/OCR utilities, the roadmap
+routes (stablecoin depeg, DeFi yields, protocol health, NFT analytics), SEC
+EDGAR fundamentals, wallet smart-money scoring, prospect enrichment,
+discoverability tuning, the 34-chain EVM expansion, marketplace copy, and
+yield opportunities -- none of them touch pay.sh either way. This is the one
+open item on the roadmap that needs a person at a keyboard running `vercel`
+commands rather than another API build; everything else on the public
+`/v1/*` catalog and the Bazaar listing is unaffected by it being unfinished.
+
+**Where this document was updated:** this section is new as of 2026-08-23,
+added to give a single at-a-glance status point now that the per-round detail
+below has grown to 30+ dated sections. No application code changed with this
+update -- documentation and a backup branch only.
+
 ## 1. Get a Solana wallet
 
 Any standard Solana address works — Phantom, Solflare, or one generated
@@ -724,7 +767,7 @@ via the spec's `routing.auth` block; submit the deployed pay.sh gateway URL
 through pay.sh's "List your API" form. None of that is required for the
 existing public `/v1/*` catalog or Bazaar listing -- this is purely additive.
 
-**Status (2026-08-22): paused here, pick up at step 5 of the deployment guide.** Steps 1-4 of `paysh-gateway-vercel-deployment-guide.md` (Vercel CLI install/login, operator keypair generation, funding it with SOL, generating `PAY_MPP_CHALLENGE_SECRET`/choosing `PAY_RPC_URL`) have NOT been executed yet -- this got shelved to build three new public routes (currency conversion, webpage-to-PDF, image OCR) instead. Nothing about that other work touches this: `paysh-provider.yml`, `Dockerfile.vercel`, and the `/internal/paysh/*` routes are all still in place, unchanged, ready to resume from step 5 (`git clone` + `vercel link`) whenever this is picked back up.
+**Status (2026-08-22): paused here, pick up at step 5 of the deployment guide.** Steps 1-4 of `paysh-gateway-vercel-deployment-guide.md` (Vercel CLI install/login, operator keypair generation, funding it with SOL, generating `PAY_MPP_CHALLENGE_SECRET`/choosing `PAY_RPC_URL`) have NOT been executed yet -- this got shelved to build three new public routes (currency conversion, webpage-to-PDF, image OCR) instead. Nothing about that other work touches this: `paysh-provider.yml`, `Dockerfile.vercel`, and the `/internal/paysh/*` routes are all still in place, unchanged, ready to resume from step 5 (`git clone` + `vercel link`) whenever this is picked back up. **Confirmed still accurate as of 2026-08-23** -- no further pay.sh work has happened since this was written; see "Status summary & version log" near the top of this README for the running tally of what has shipped in the meantime.
 
 ## New utility routes: currency conversion, webpage-to-PDF, image OCR (2026-08-22)
 

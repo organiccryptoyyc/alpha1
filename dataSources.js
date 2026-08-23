@@ -3025,3 +3025,176 @@ export async function getSanctionsCheck(addressRaw, { chain: chainRaw } = {}) {
     fetchedAt: new Date().toISOString(),
   };
 }
+
+// --- SEC EDGAR company fundamentals (2026-08-23) ----------------------------
+// Free, keyless SEC EDGAR JSON APIs (data.sec.gov). SEC requires a declared
+// User-Agent identifying the requester (see sec.gov/about/webmaster-frequently-
+// asked-questions#developers) -- not an API key, just a descriptive header, or
+// requests get 403'd as an "undeclared automated tool". Rate limit is 10 req/s
+// per IP, comfortably above what this route needs. Three calls chained per
+// lookup: (1) the ticker->CIK map (company_tickers.json, ~800KB, cached
+// in-process for 24h -- same "shared, not per-request" caching discipline as
+// loadOfacLists() above), (2) the submissions API for filing history +
+// company metadata, (3) the XBRL company-facts API for the actual financial
+// figures. Only a curated set of the most commonly-used us-gaap concepts are
+// surfaced -- the raw companyfacts payload is enormous (every XBRL tag a
+// company has ever used, going back years).
+const SEC_USER_AGENT =
+  process.env.SEC_EDGAR_USER_AGENT || "Alpha7 x402 API contact@organiccryptoyyc.com";
+const SEC_TICKER_MAP_URL = "https://www.sec.gov/files/company_tickers.json";
+const SEC_TICKER_MAP_TTL_MS = 24 * 60 * 60 * 1000; // 24h -- SEC updates this file periodically, not intraday
+let secTickerMapCache = null; // { fetchedAt, byTicker: Map<ticker, {cik, name}> }
+
+async function secFetch(url) {
+  const res = await fetch(url, {
+    headers: { "User-Agent": SEC_USER_AGENT, "Accept-Encoding": "gzip, deflate" },
+  });
+  if (!res.ok) throw new Error(`SEC EDGAR fetch failed: HTTP ${res.status} (${url})`);
+  return res.json();
+}
+
+async function loadSecTickerMap() {
+  if (secTickerMapCache && Date.now() - secTickerMapCache.fetchedAt < SEC_TICKER_MAP_TTL_MS) {
+    return secTickerMapCache.byTicker;
+  }
+  const json = await secFetch(SEC_TICKER_MAP_URL);
+  const byTicker = new Map();
+  for (const entry of Object.values(json)) {
+    if (entry && entry.ticker) {
+      byTicker.set(String(entry.ticker).toUpperCase(), {
+        cik: String(entry.cik_str).padStart(10, "0"),
+        name: entry.title,
+      });
+    }
+  }
+  secTickerMapCache = { fetchedAt: Date.now(), byTicker };
+  return byTicker;
+}
+
+// A handful of the most commonly-requested us-gaap concepts, each with a
+// couple of fallback tag names since companies don't always tag the same
+// line item the same way (e.g. many tag total revenue as
+// RevenueFromContractWithCustomerExcludingAssessedTax post-ASC 606 instead
+// of the older Revenues tag).
+const SEC_CONCEPTS = {
+  revenue: ["Revenues", "RevenueFromContractWithCustomerExcludingAssessedTax", "SalesRevenueNet"],
+  netIncome: ["NetIncomeLoss"],
+  totalAssets: ["Assets"],
+  totalLiabilities: ["Liabilities"],
+  stockholdersEquity: ["StockholdersEquity"],
+  epsBasic: ["EarningsPerShareBasic"],
+  epsDiluted: ["EarningsPerShareDiluted"],
+  cashAndEquivalents: ["CashAndCashEquivalentsAtCarryingValue"],
+};
+
+function periodLabel(fact) {
+  return fact.start ? `${fact.start}..${fact.end}` : fact.end;
+}
+
+function pickLatestFact(factsForConcept, formFilter) {
+  // Picks the most-recently-filed entry matching formFilter (10-K or 10-Q),
+  // since restated/duplicate values for the same period are common in XBRL
+  // and the latest filing is the one most likely to be accurate.
+  const candidates = factsForConcept.filter((f) => formFilter.includes(f.form));
+  if (!candidates.length) return null;
+  candidates.sort((a, b) => new Date(b.filed) - new Date(a.filed));
+  return candidates[0];
+}
+
+export async function getSecEdgarFundamentals(tickerRaw) {
+  const ticker = String(tickerRaw || "").trim().toUpperCase();
+  if (!ticker) throw new Error("ticker is required, e.g. AAPL, MSFT, TSLA");
+
+  const tickerMap = await loadSecTickerMap();
+  const entry = tickerMap.get(ticker);
+  if (!entry) {
+    throw new Error(
+      `no SEC-registered company found for ticker "${ticker}" -- SEC's ticker map only covers companies that file with the SEC (US-listed and some foreign private issuers), not every exchange-listed ticker`
+    );
+  }
+  const { cik, name: mapName } = entry;
+
+  const [submissions, facts] = await Promise.all([
+    secFetch(`https://data.sec.gov/submissions/CIK${cik}.json`),
+    secFetch(`https://data.sec.gov/api/xbrl/companyfacts/CIK${cik}.json`).catch(() => null),
+    // companyfacts 404s for filers with no XBRL-tagged facts (rare, mostly
+    // very small filers) -- degrade to filings-only rather than failing the
+    // whole call.
+  ]);
+
+  const recent = submissions.filings?.recent;
+  let recentFilings = [];
+  if (recent && Array.isArray(recent.form)) {
+    recentFilings = recent.form.map((form, i) => ({
+      form,
+      filingDate: recent.filingDate[i],
+      accessionNumber: recent.accessionNumber[i],
+      primaryDocument: recent.primaryDocument[i],
+    }));
+  }
+  const latest10K = recentFilings.find((f) => f.form === "10-K") || null;
+  const latest10Q = recentFilings.find((f) => f.form === "10-Q") || null;
+
+  const usGaap = facts?.facts?.["us-gaap"] || {};
+  const financials = {};
+  for (const [key, tagNames] of Object.entries(SEC_CONCEPTS)) {
+    let picked = null;
+    for (const tag of tagNames) {
+      const unitFacts = usGaap[tag]?.units;
+      if (!unitFacts) continue;
+      // EPS is reported in USD/shares, everything else in plain USD -- grab
+      // whichever unit key is actually present rather than hardcoding "USD".
+      const unitKey = Object.keys(unitFacts)[0];
+      const allFacts = unitFacts[unitKey] || [];
+      const annual = pickLatestFact(allFacts, ["10-K"]);
+      const quarterly = pickLatestFact(allFacts, ["10-Q"]);
+      if (annual || quarterly) {
+        picked = {
+          tag,
+          unit: unitKey,
+          annual: annual
+            ? {
+                value: annual.val,
+                fiscalYear: annual.fy,
+                period: periodLabel(annual),
+                filed: annual.filed,
+                accessionNumber: annual.accn,
+              }
+            : null,
+          quarterly: quarterly
+            ? {
+                value: quarterly.val,
+                fiscalYear: quarterly.fy,
+                fiscalPeriod: quarterly.fp,
+                period: periodLabel(quarterly),
+                filed: quarterly.filed,
+                accessionNumber: quarterly.accn,
+              }
+            : null,
+        };
+        break;
+      }
+    }
+    financials[key] = picked;
+  }
+
+  return {
+    source: "sec-edgar",
+    ticker,
+    cik,
+    companyName: submissions.name || mapName,
+    sic: submissions.sic,
+    sicDescription: submissions.sicDescription,
+    fiscalYearEnd: submissions.fiscalYearEnd,
+    exchanges: submissions.exchanges,
+    stateOfIncorporation: submissions.stateOfIncorporation,
+    latestFilings: {
+      tenK: latest10K,
+      tenQ: latest10Q,
+    },
+    financials,
+    filingCount: recentFilings.length,
+    note: facts ? undefined : "no XBRL company-facts data available for this filer -- filing metadata only",
+    fetchedAt: new Date().toISOString(),
+  };
+}

@@ -1282,6 +1282,37 @@ export const routes = {
       },
     }),
   },
+  "GET /v1/prospect/enrichment/:chain/:address": {
+    accepts: multiNetworkAccepts(0.03),
+    description:
+      "CRM/sales lead-scoring composite for a wallet address: wallet-smart-money activity score, OFAC sanctions screening (hard stop if matched), and an optional Tranco domain-rank check if a company domain is supplied via ?domain=. Returns one verdict and recommended action (prioritize outreach / standard outreach / deprioritize / block) instead of three separate calls. Domain is optional -- omit it for wallet-only leads.",
+    extensions: declareDiscoveryExtension({
+      pathParams: { chain: "ethereum", address: "0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045" },
+      pathParamsSchema: {
+        properties: {
+          chain: { type: "string", description: "ethereum or solana" },
+          address: { type: "string", description: "wallet address on the given chain" },
+        },
+        required: ["chain", "address"],
+      },
+      queryParams: {
+        properties: {
+          domain: {
+            type: "string",
+            description: "optional company domain to check against Tranco's top-1M list, e.g. example.com",
+          },
+        },
+      },
+      output: {
+        example: {
+          source: "prospect-enrichment",
+          chain: "ethereum",
+          verdict: "qualified lead -- active, meaningful balance",
+          recommendedAction: "prioritize outreach",
+        },
+      },
+    }),
+  },
 };
 
 export function buildX402Middleware() {

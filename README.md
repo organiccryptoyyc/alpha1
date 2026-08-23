@@ -941,6 +941,47 @@ zksync-era, sei, hyperliquid, xrplevm) was verified live against the real
 gateway (`eth_gasPrice`, HTTP 200, real value returned) rather than trusting
 the registry file alone.
 
+## Yield/staking opportunity recommender (2026-08-23)
+
+Three new routes answering the single most valuable question a DeFi-facing
+agent asks -- "where should I stake or add liquidity right now, and what
+would I actually earn":
+
+- **`GET /v1/yield/best-opportunities/:address`** (**$0.25/call**) -- EVM
+  address, scanned for native-token balance across all 37 EVM chains this
+  API supports (eth/bsc/peaq + the 34-chain POKT expansion above).
+- **`GET /v1/yield/best-opportunities/solana/:address`** (**$0.25/call**)
+  -- same recommendation, scoped to a single Solana address.
+- **`GET /v1/yield/best-opportunities/combined/:address/:solAddress`**
+  (**$0.30/call**) -- both in one request, ranked together. Priced as a
+  bundle rather than the sum of the two standalone routes ($0.25 each) --
+  cheaper than calling both separately.
+
+**How it works:** for whichever chains hold a non-dust balance, prices that
+balance to USD (via a new native-token CoinGecko price map -- every id
+verified live 2026-08-23), pulls that chain's live yield pools from
+DefiLlama (reusing `getYieldAggregation` from the 2026-08-22 DeFi yield
+round -- Uniswap, PancakeSwap, Stargate, Aerodrome, and effectively every
+other major DEX/lending protocol in one source), and ranks the top 3
+opportunities **by projected 12-month USD earnings** globally across every
+chain scanned. Each result also states the same figure in APY and in the
+chain's native token, plus an estimated gas cost to enter the position
+(live gas price times a documented ~150,000-gas-unit swap estimate). No KYC,
+no wallet connection -- just an address.
+
+**DefiLlama chain-name mapping:** DefiLlama's own display names diverge
+from the slugs used elsewhere in this file for several chains -- verified
+live against `api.llama.fi/chains` 2026-08-23: `gnosis` -> `"xDai"`,
+`kaia` -> `"Klaytn"` (DefiLlama hasn't renamed it yet), `opbnb` ->
+`"Op_Bnb"`, `hyperliquid` -> `"Hyperliquid L1"`. See `DEFILLAMA_CHAIN_NAME`
+in `dataSources.js` for the full map.
+
+**Not financial advice:** every response includes a `disclaimer` field --
+APY is a live snapshot that changes constantly, projected earnings assume
+the current rate holds for the full period, and smart-contract/
+impermanent-loss/price risk all apply. The user executes and accepts any
+resulting transaction themselves.
+
 ## Routes and pricing
 
 | Route | Price | What it returns |

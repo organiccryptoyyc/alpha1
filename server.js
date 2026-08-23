@@ -55,6 +55,7 @@ import {
   getPuppeteerPdf,
   getImageOcr,
   getSecEdgarFundamentals,
+  getWalletSmartMoney,
 } from "./dataSources.js";
 
 const app = express();
@@ -908,6 +909,22 @@ app.get("/v1/sec/fundamentals/:ticker", async (req, res, next) => {
   }
 });
 
+
+// Wallet smart-money scoring (2026-08-23). $0.02/call. 5-minute cache -- much
+// shorter than the sanctions/SEC caches since balance and tx-count change in
+// real time and this route is explicitly about current activity.
+app.get("/v1/wallet/smart-money/:chain/:address", async (req, res, next) => {
+  try {
+    const { chain, address } = req.params;
+    res.json(
+      await cached(`wallet:smart-money:${chain}:${address}`, 300, () =>
+        getWalletSmartMoney(chain, address)
+      )
+    );
+  } catch (err) {
+    next(err);
+  }
+});
 
 // PATCH (2026-08-19): pay.sh internal proxy routes.
 //

@@ -3198,3 +3198,138 @@ export async function getSecEdgarFundamentals(tickerRaw) {
     fetchedAt: new Date().toISOString(),
   };
 }
+
+// --- Wallet smart-money scoring (2026-08-23) --------------------------------
+// A transparent, from-free-primitives activity/balance heuristic -- NOT the
+// same thing as the proprietary entity-labeled "smart money" trackers sold by
+// Nansen/Arkham/etc, which rely on curated wallet-tagging databases this
+// project doesn't have access to. What this *can* honestly offer from the
+// same free RPC endpoints already used by getEthBalance/getEthLogs/
+// getSolTransactionHistory: current USD-denominated balance, an activity
+// count (ETH nonce as an outgoing-tx-count proxy; Solana recent-signature
+// count), and -- Solana only, since Ethereum's JSON-RPC has no cheap way to
+// get a wallet's last-active timestamp without an indexer -- how recently the
+// wallet was last active. Composited into a documented 0-100 score plus a
+// plain-language verdict, same "show the formula, don't just assert a label"
+// posture as x402_seller_trust's settlement-volume signal and brand_verify's
+// Tranco-rank fold-in.
+const SMART_MONEY_SUPPORTED_CHAINS = ["ethereum", "solana"];
+
+function usdBalanceTierScore(usd) {
+  if (usd === null || !Number.isFinite(usd)) return 0;
+  if (usd >= 100000) return 40;
+  if (usd >= 10000) return 32;
+  if (usd >= 1000) return 22;
+  if (usd >= 100) return 12;
+  if (usd > 0) return 5;
+  return 0;
+}
+
+function verdictForScore(score) {
+  if (score >= 80) return "high-activity established wallet";
+  if (score >= 55) return "active, meaningful balance";
+  if (score >= 30) return "light activity";
+  if (score >= 10) return "thin activity";
+  return "dormant or near-empty";
+}
+
+export async function getWalletSmartMoney(chainRaw, addressRaw) {
+  const chain = String(chainRaw || "").trim().toLowerCase();
+  const address = String(addressRaw || "").trim();
+  if (!SMART_MONEY_SUPPORTED_CHAINS.includes(chain)) {
+    throw new Error(`chain must be one of: ${SMART_MONEY_SUPPORTED_CHAINS.join(", ")}`);
+  }
+
+  if (chain === "ethereum") {
+    if (!/^0x[a-fA-F0-9]{40}$/.test(address)) {
+      throw new Error("address must be a 0x-prefixed 20-byte Ethereum address");
+    }
+    const [balanceHex, nonceHex, code, priceInfo] = await Promise.all([
+      rpcCall(ETH_RPC_URL, "eth_getBalance", [address, "latest"]),
+      rpcCall(ETH_RPC_URL, "eth_getTransactionCount", [address, "latest"]),
+      rpcCall(ETH_RPC_URL, "eth_getCode", [address, "latest"]),
+      getTokenPrice("eth").catch(() => null),
+    ]);
+    const eth = Number(BigInt(balanceHex || "0x0")) / 1e18;
+    const nonce = parseInt(nonceHex || "0x0", 16);
+    const isContract = Boolean(code && code !== "0x");
+    const usd = priceInfo?.usd != null ? Math.round(eth * priceInfo.usd * 100) / 100 : null;
+
+    const balanceScore = usdBalanceTierScore(usd);
+    // Nonce as an outgoing-tx-count proxy for activity -- capped at 300 so a
+    // handful of very old, very active addresses don't just clip at the max
+    // and hide the rest of the curve.
+    const activityScore = Math.round((Math.min(nonce, 300) / 300) * 40);
+    const score = isContract ? 0 : balanceScore + activityScore;
+
+    return {
+      source: "wallet-smart-money",
+      chain: "ethereum",
+      address,
+      isContract,
+      balance: { eth, usd },
+      activity: { outgoingTxCount: nonce },
+      recency: null,
+      score: Math.min(100, score),
+      scoreBreakdown: { balanceScore, activityScore, recencyScore: null },
+      verdict: isContract
+        ? "not an EOA -- this address is a contract, score not meaningful"
+        : verdictForScore(score),
+      note: "Ethereum recency signal unavailable without an indexed data source (no cheap RPC path to a wallet's last-active timestamp) -- score here weighs balance + outgoing-tx-count only.",
+      fetchedAt: new Date().toISOString(),
+    };
+  }
+
+  // solana
+  if (!/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(address)) {
+    throw new Error("address must be a base58 Solana address");
+  }
+  const [balanceRaw, signaturesRaw, priceInfo] = await Promise.all([
+    rpcCall(SOL_RPC_URL, "getBalance", [address]),
+    rpcCall(SOL_RPC_URL, "getSignaturesForAddress", [address, { limit: 100 }]),
+    getTokenPrice("sol").catch(() => null),
+  ]);
+  const lamports = typeof balanceRaw === "object" && balanceRaw !== null ? balanceRaw.value : balanceRaw;
+  const sol = (lamports || 0) / 1e9;
+  const usd = priceInfo?.usd != null ? Math.round(sol * priceInfo.usd * 100) / 100 : null;
+  const signatures = Array.isArray(signaturesRaw) ? signaturesRaw : [];
+  const txCount = signatures.length;
+  const blockTimes = signatures.map((s) => s.blockTime).filter((t) => typeof t === "number");
+  const mostRecent = blockTimes.length ? Math.max(...blockTimes) : null;
+  const daysSinceLastActive = mostRecent !== null ? (Date.now() / 1000 - mostRecent) / 86400 : null;
+
+  const balanceScore = usdBalanceTierScore(usd);
+  // Signature count in the last-100 window as an activity proxy -- capped at
+  // 100 (the query limit itself), scaled to the same 0-40 band as Ethereum's
+  // nonce-based score for a roughly comparable read across chains.
+  const activityScore = Math.round((Math.min(txCount, 100) / 100) * 40);
+  let recencyScore = 0;
+  if (daysSinceLastActive !== null) {
+    if (daysSinceLastActive <= 1) recencyScore = 20;
+    else if (daysSinceLastActive <= 7) recencyScore = 15;
+    else if (daysSinceLastActive <= 30) recencyScore = 10;
+    else if (daysSinceLastActive <= 90) recencyScore = 5;
+  }
+  const score = balanceScore + activityScore + recencyScore;
+
+  return {
+    source: "wallet-smart-money",
+    chain: "solana",
+    address,
+    isContract: false,
+    balance: { sol, usd },
+    activity: { recentTxCount: txCount, windowLimit: 100 },
+    recency:
+      mostRecent !== null
+        ? {
+            lastActiveAt: new Date(mostRecent * 1000).toISOString(),
+            daysSinceLastActive: Math.round(daysSinceLastActive * 10) / 10,
+          }
+        : null,
+    score: Math.min(100, score),
+    scoreBreakdown: { balanceScore, activityScore, recencyScore },
+    verdict: verdictForScore(score),
+    note: "recentTxCount reflects the most recent 100 signatures only, not full history since genesis -- same scoping as getSolTransactionHistory above.",
+    fetchedAt: new Date().toISOString(),
+  };
+}

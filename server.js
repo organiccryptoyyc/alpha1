@@ -60,6 +60,9 @@ import {
   getChainGasPrice,
   getChainLatestBlock,
   getChainBalance,
+  getYieldOpportunities,
+  getYieldOpportunitiesSolana,
+  getYieldOpportunitiesCombined,
 } from "./dataSources.js";
 
 const app = express();
@@ -991,6 +994,43 @@ app.get("/v1/prospect/enrichment/:chain/:address", async (req, res, next) => {
     next(err);
   }
 });
+
+// Yield/staking opportunity recommender (2026-08-23). Heaviest composite in
+// the catalog -- up to 37 parallel EVM RPC balance calls plus a CoinGecko
+// price lookup plus per-chain DefiLlama yield queries -- so a longer 60s
+// cache TTL than the lighter single-source routes above, matching the
+// 120s TTL already used for prospect-enrichment's similarly-composite shape.
+app.get("/v1/yield/best-opportunities/:address", async (req, res, next) => {
+  try {
+    const { address } = req.params;
+    res.json(await cached(`yield:evm:${address}`, 60, () => getYieldOpportunities(address)));
+  } catch (err) {
+    next(err);
+  }
+});
+
+app.get("/v1/yield/best-opportunities/solana/:address", async (req, res, next) => {
+  try {
+    const { address } = req.params;
+    res.json(await cached(`yield:sol:${address}`, 60, () => getYieldOpportunitiesSolana(address)));
+  } catch (err) {
+    next(err);
+  }
+});
+
+app.get("/v1/yield/best-opportunities/combined/:address/:solAddress", async (req, res, next) => {
+  try {
+    const { address, solAddress } = req.params;
+    res.json(
+      await cached(`yield:combined:${address}:${solAddress}`, 60, () =>
+        getYieldOpportunitiesCombined(address, solAddress)
+      )
+    );
+  } catch (err) {
+    next(err);
+  }
+});
+
 
 // PATCH (2026-08-19): pay.sh internal proxy routes.
 //

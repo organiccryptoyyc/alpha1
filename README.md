@@ -35,23 +35,25 @@ below) once volume justifies it.
 
 ## Status summary & version log
 
-**Current backup: `v1u`** (branch `backup/verified-working-2026-08-23-v1u`, the
-21st verified-working snapshot of this repo). Full history:
+**Current backup: `v1w`** (branch `backup/verified-working-2026-08-24-v1w`, the
+23rd verified-working snapshot of this repo). Full history:
 `backup/verified-working-2026-08-08` through
 `backup/verified-working-2026-08-23-round12-yield-opportunities` (20 branches,
 one per shipped round). Starting with this one, backups also carry a short
 `v1<letter>` tag -- one letter per verified-working snapshot, `a` through `z`,
 then `v2.0a` through `v2.0z`, and so on if this project outlives the alphabet.
 
-**Live and confirmed in production as of 2026-08-23:** 45 metered routes.
+**Live and confirmed in production as of 2026-08-24:** 50 metered routes.
 `/.well-known/x402` on the deployed API is the always-current, authoritative
 list -- the pricing table further down this README is illustrative, not
 exhaustive (it predates most of the routes below). Every dated section in
 this README shipped, was pushed to `main`, redeployed via Portainer, and
 live-payment-tested against the production URL before being marked done.
-Most recent: the yield/staking opportunity recommender (three routes --
-EVM, Solana, and a combined bundle -- $0.25/$0.25/$0.30, see
-"Yield/staking opportunity recommender" below).
+Most recent: 5 composite bundle routes (chain-snapshot, wallet-risk,
+domain-trust, defi/precheck, pokt/pulse -- see "Composite bundle routes"
+below) layered over already-shipped functions, plus an unrelated x402
+client-library version bump (2.20.0 -> 2.23.0) that did not resolve the
+known Solana payment-settlement issue noted there.
 
 **Not complete: the pay.sh listing.** The proxy-route plumbing
 (`/internal/paysh/*` in `server.js`, `paysh-provider.yml`,
@@ -75,6 +77,64 @@ commands rather than another API build; everything else on the public
 added to give a single at-a-glance status point now that the per-round detail
 below has grown to 30+ dated sections. No application code changed with this
 update -- documentation and a backup branch only.
+
+## Composite bundle routes (2026-08-24)
+
+Five bundle routes layered over already-shipped functions -- one call
+instead of two-to-four, one verdict instead of merging several JSON
+payloads client-side. No new upstream data sources; same caching/error
+conventions as every other route in this catalog.
+
+- **`GET /v1/chain-snapshot/:chain`** ($0.012) -- gas price + latest block
+  (+ native balance if you pass `?address=`) for any of the 38 chains this
+  API supports: eth, sol, peaq, bsc, plus the 34-chain POKT gateway map, in
+  one call instead of two or three.
+- **`GET /v1/wallet-risk/:chain/:address`** ($0.045) -- wallet balance +
+  wallet-smart-money activity score + OFAC sanctions screening for an eth or
+  sol address, one call and one verdict instead of three.
+- **`GET /v1/domain-trust/:domain`** ($0.32) -- brand-verify's
+  uptime/performance/IP-intel trust score plus x402-seller-trust's
+  Bazaar-listing/manifest/resource-probing reputation for the same domain,
+  combined into one score and verdict. Priced as a bundle ($0.32) rather
+  than the sum of the two standalone routes ($0.23 + $0.27 = $0.50). Works
+  for any domain, not just active x402 sellers.
+- **`GET /v1/defi/precheck`** ($0.028) -- stablecoin depeg status + top DeFi
+  yield pools + protocol/chain health score for one protocol or chain,
+  rolled into a "anything obviously wrong before I deploy capital here"
+  verdict. Priced below the sum of the three standalone routes.
+- **`GET /v1/pokt/pulse`** ($0.095) -- Pocket Network (Shannon)
+  service-demand + supplier landscape + tokenomics + throughput leaderboard
+  in one call instead of four. Priced below the sum of the four standalone
+  routes.
+
+Shipped via PR #15 (`feature/2026-08-24-bundle-routes` -> `main`), backed up
+as `backup/verified-working-2026-08-24-v1w`.
+
+**Also this round: x402 client-library version bump, Solana settlement still
+unresolved.** Bumped `@x402/core`, `@x402/evm`, `@x402/express`,
+`@x402/extensions`, `@x402/svm` from `2.20.0` to `2.23.0` (PR #14) on the
+theory that the real $0.25 Solana USDC payment failure against
+`/v1/yield/best-opportunities/*` was a version-drift issue between this
+server's dependencies and current x402 v2 client libraries. Retested after
+redeploy with a real funded CDP-managed Solana test wallet across four
+different client approaches (raw `ExactSvmScheme` + manual registration, the
+documented `registerExactSvmScheme` helper, a CDP-account-bridged signer,
+and CDP's own native `CdpX402Client`) -- all four hit the same or an
+equivalent facilitator/client-side rejection
+(`'paymentPayload' is invalid: must match one of [x402V2Pay...` or, for
+`CdpX402Client`, "no network/scheme registered" since its default config
+only registers Base). The version bump shipped regardless since it's a
+reasonable dependency hygiene update on its own merits, but it did not fix
+the underlying issue. Root cause is unconfirmed but is most likely a deeper
+incompatibility between this server's Solana sponsored-transaction `extra`
+fields (`feePayer`/`recentBlockhash`/`lastValidBlockHeight`) and what
+current x402 v2 client libraries can consume -- an ecosystem-level gap, not
+something fixable from this repo alone. Every other payment network on this
+catalog (Base, Polygon, Arbitrum, World via the CDP facilitator) is
+unaffected; this is specific to the Solana leg. Treating this as a known,
+open item rather than continuing to debug it client-side -- see git history
+around 2026-08-23/24 for the full investigation if it needs revisiting.
+
 
 ## 1. Get a Solana wallet
 

@@ -56,6 +56,7 @@ import {
   getImageOcr,
   getSecEdgarFundamentals,
   getWalletSmartMoney,
+  getProspectEnrichment,
 } from "./dataSources.js";
 
 const app = express();
@@ -919,6 +920,27 @@ app.get("/v1/wallet/smart-money/:chain/:address", async (req, res, next) => {
     res.json(
       await cached(`wallet:smart-money:${chain}:${address}`, 300, () =>
         getWalletSmartMoney(chain, address)
+      )
+    );
+  } catch (err) {
+    next(err);
+  }
+});
+
+// Prospect enrichment for CRM/sales agents (2026-08-23). $0.03/call.
+// Composite of wallet-smart-money + sanctions-check + optional Tranco
+// domain-rank (?domain=). 2-minute cache -- short-lived like the wallet
+// score it wraps, since this is about a lead's current standing, not a
+// static record.
+app.get("/v1/prospect/enrichment/:chain/:address", async (req, res, next) => {
+  try {
+    const { chain, address } = req.params;
+    const { domain } = req.query;
+    res.json(
+      await cached(
+        `prospect:enrichment:${chain}:${address}:${domain || ""}`,
+        120,
+        () => getProspectEnrichment(chain, address, domain)
       )
     );
   } catch (err) {

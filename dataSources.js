@@ -3333,3 +3333,69 @@ export async function getWalletSmartMoney(chainRaw, addressRaw) {
     fetchedAt: new Date().toISOString(),
   };
 }
+
+// --- Prospect enrichment for CRM/sales agents (2026-08-23) ------------------
+// A CRM or sales-outreach agent working web3 leads typically has a wallet
+// address on hand (from an on-chain interaction, a Discord/Twitter tip-jar
+// link, a token-gated signup form, etc) and sometimes a company domain.
+// This bundles three existing signals into one call rather than three:
+// wallet-smart-money (is this wallet worth pursuing), sanctions-check (is it
+// clean -- a hard stop, not just a scoring input), and, if a domain is
+// supplied, a Tranco domain-rank lookup (is the associated company a real,
+// established site). The Tranco call reuses getTrancoRank() directly rather
+// than invoking the full brand_verify route -- brand_verify's multi-region
+// UpRock Verify screenshots and IP geolocation are a heavier, separately
+// priced trust/safety audit ($0.23) that doesn't belong bundled into a
+// lightweight lead-scoring call; Tranco alone is free, keyless, and fast,
+// same "right tool for this job" reasoning as everywhere else in this file.
+// Domain is optional: a wallet-only lead (the common case) still gets a full
+// score, just without the domainRank field.
+export async function getProspectEnrichment(chainRaw, addressRaw, domainRaw) {
+  const chain = String(chainRaw || "").trim().toLowerCase();
+  const address = String(addressRaw || "").trim();
+  const domain = domainRaw ? String(domainRaw).trim().toLowerCase() : null;
+
+  const [wallet, sanctions, domainRank] = await Promise.all([
+    getWalletSmartMoney(chain, address),
+    getSanctionsCheck(address, { chain }),
+    domain ? getTrancoRank(domain) : Promise.resolve(null),
+  ]);
+
+  let verdict;
+  let recommendedAction;
+  if (sanctions.sanctioned) {
+    verdict = "do not contact -- wallet matches OFAC SDN list";
+    recommendedAction = "block";
+  } else if (wallet.score >= 55) {
+    verdict = `qualified lead -- ${wallet.verdict}`;
+    recommendedAction = "prioritize outreach";
+  } else if (wallet.score >= 30) {
+    verdict = `possible lead -- ${wallet.verdict}`;
+    recommendedAction = "standard outreach";
+  } else {
+    verdict = `low priority -- ${wallet.verdict}`;
+    recommendedAction = "deprioritize or skip";
+  }
+  if (domain && domainRank && domainRank.available === false) {
+    verdict += " (company domain not found in Tranco's top 1M -- verify legitimacy manually)";
+  }
+
+  return {
+    source: "prospect-enrichment",
+    chain,
+    address,
+    domain,
+    wallet,
+    sanctions: {
+      sanctioned: sanctions.sanctioned,
+      matchType: sanctions.matchType,
+      list: sanctions.list,
+      listSyncedAt: sanctions.listSyncedAt,
+    },
+    domainRank,
+    verdict,
+    recommendedAction,
+    note: "Composite of wallet-smart-money + sanctions-check (+ Tranco domain rank if a domain is supplied). Not a replacement for the standalone /v1/wallet/smart-money, /v1/compliance/sanctions-check, or /v1/brand-verify routes if you need their full, disclosed detail.",
+    fetchedAt: new Date().toISOString(),
+  };
+}

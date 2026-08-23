@@ -63,6 +63,11 @@ import {
   getYieldOpportunities,
   getYieldOpportunitiesSolana,
   getYieldOpportunitiesCombined,
+getChainSnapshot,
+  getWalletRisk,
+  getDomainTrust,
+  getDefiPreCheck,
+  getPoktPulse,
 } from "./dataSources.js";
 
 const app = express();
@@ -1031,6 +1036,62 @@ app.get("/v1/yield/best-opportunities/combined/:address/:solAddress", async (req
   }
 });
 
+
+// --- Composite bundle routes (2026-08-24) -------------------------------
+// See dataSources.js's matching comment block for the full rationale --
+// five bundles over already-shipped functions, one call instead of
+// two-to-four, one verdict instead of merging several JSON payloads
+// client-side.
+
+app.get("/v1/chain-snapshot/:chain", async (req, res, next) => {
+  try {
+    const { chain } = req.params;
+    const { address } = req.query;
+    res.json(await cached(`chain-snapshot:${chain}:${address || ""}`, 6, () => getChainSnapshot(chain, address)));
+  } catch (err) {
+    next(err);
+  }
+});
+
+app.get("/v1/wallet-risk/:chain/:address", async (req, res, next) => {
+  try {
+    const { chain, address } = req.params;
+    res.json(await cached(`wallet-risk:${chain}:${address}`, 120, () => getWalletRisk(chain, address)));
+  } catch (err) {
+    next(err);
+  }
+});
+
+app.get("/v1/domain-trust/:domain", async (req, res, next) => {
+  try {
+    const { domain } = req.params;
+    res.json(await cached(`domain-trust:${domain}`, 300, () => getDomainTrust(domain)));
+  } catch (err) {
+    next(err);
+  }
+});
+
+app.get("/v1/defi/precheck", async (req, res, next) => {
+  try {
+    const { protocol, chain, symbols, thresholdPct, minTvlUsd, limit } = req.query;
+    if (!protocol && !chain) return res.status(400).json({ error: "protocol or chain query param is required" });
+    const cacheKey = `defi:precheck:${protocol || ""}:${chain || ""}:${symbols || ""}:${thresholdPct || ""}:${minTvlUsd || ""}:${limit || ""}`;
+    res.json(
+      await cached(cacheKey, 300, () => getDefiPreCheck({ protocol, chain, symbols, thresholdPct, minTvlUsd, limit }))
+    );
+  } catch (err) {
+    next(err);
+  }
+});
+
+app.get("/v1/pokt/pulse", async (req, res, next) => {
+  try {
+    const { limit } = req.query;
+    res.json(await cached(`pokt:pulse:${limit || 10}`, 60, () => getPoktPulse(limit)));
+  } catch (err) {
+    next(err);
+  }
+});
 
 // PATCH (2026-08-19): pay.sh internal proxy routes.
 //

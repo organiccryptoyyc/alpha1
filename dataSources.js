@@ -3881,3 +3881,247 @@ export async function getYieldOpportunitiesCombined(addressRaw, solAddressRaw) {
     fetchedAt: new Date().toISOString(),
   };
 }
+
+// --- Composite bundle routes (2026-08-24) -----------------------------
+// Five bundles designed around what buyers were already stitching together
+// manually from the standalone routes above: one call instead of two-to-
+// four, one verdict instead of several JSON blobs to merge client-side.
+// Every function below is a thin composition over already-shipped
+// functions in this file -- no new upstream data sources, same
+// caching/error conventions as the rest of the file.
+
+const CHAIN_SNAPSHOT_NATIVE = {
+  eth: { gasPrice: getEthGasPrice, latestBlock: getEthLatestBlock, balance: getEthBalance, chainName: "Ethereum" },
+  peaq: { gasPrice: getPeaqGasPrice, latestBlock: getPeaqLatestBlock, balance: getPeaqBalance, chainName: "peaq" },
+  bsc: { gasPrice: getBscGasPrice, latestBlock: getBscLatestBlock, balance: getBscBalance, chainName: "BNB Smart Chain" },
+};
+
+// Bundle 1: Chain Snapshot -- gas price + latest block (+ native balance if
+// an address is supplied) for any of the 38 chains this API supports (eth,
+// sol, peaq, bsc, plus the 34-chain POKT gateway map), in one call.
+export async function getChainSnapshot(chainRaw, addressRaw) {
+  const chain = String(chainRaw || "").trim().toLowerCase();
+  const address = addressRaw ? String(addressRaw).trim() : null;
+
+  if (chain === "sol") {
+    const [latestBlock, balance] = await Promise.all([
+      getSolLatestBlock(),
+      address ? getSolBalance(address).catch((err) => ({ error: err.message })) : Promise.resolve(null),
+    ]);
+    return {
+      source: "chain-snapshot",
+      chain: "sol",
+      chainName: "Solana",
+      gasPrice: null,
+      gasPriceNote: "Solana has no gas-price concept (fixed per-signature fee) -- omitted.",
+      latestBlock,
+      balance,
+      fetchedAt: new Date().toISOString(),
+    };
+  }
+
+  const native = CHAIN_SNAPSHOT_NATIVE[chain];
+  if (native) {
+    const [gasPrice, latestBlock, balance] = await Promise.all([
+      native.gasPrice(),
+      native.latestBlock(),
+      address ? native.balance(address).catch((err) => ({ error: err.message })) : Promise.resolve(null),
+    ]);
+    return {
+      source: "chain-snapshot",
+      chain,
+      chainName: native.chainName,
+      gasPrice,
+      latestBlock,
+      balance,
+      fetchedAt: new Date().toISOString(),
+    };
+  }
+
+  // Falls through to the 34-chain POKT gateway map. getChainGasPrice throws
+  // its own descriptive "unsupported chain" error (full slug list included)
+  // if the slug doesn't match one of those either -- no need to duplicate
+  // that validation here.
+  const [gasPrice, latestBlock, balance] = await Promise.all([
+    getChainGasPrice(chain),
+    getChainLatestBlock(chain),
+    address ? getChainBalance(chain, address).catch((err) => ({ error: err.message })) : Promise.resolve(null),
+  ]);
+  return {
+    source: "chain-snapshot",
+    chain: gasPrice.chain,
+    chainName: gasPrice.chainName,
+    gasPrice,
+    latestBlock,
+    balance,
+    fetchedAt: new Date().toISOString(),
+  };
+}
+
+const WALLET_RISK_CHAIN_ALIASES = { eth: "ethereum", ethereum: "ethereum", sol: "solana", solana: "solana" };
+
+// Bundle 2: Wallet Risk & Value -- balance + wallet-smart-money activity
+// score + OFAC sanctions screening for an eth or sol address, one call,
+// one verdict instead of three separate calls to merge yourself.
+export async function getWalletRisk(chainRaw, addressRaw) {
+  const chainInput = String(chainRaw || "").trim().toLowerCase();
+  const chain = WALLET_RISK_CHAIN_ALIASES[chainInput];
+  if (!chain) {
+    throw new Error("chain must be 'eth'/'ethereum' or 'sol'/'solana'");
+  }
+  const address = String(addressRaw || "").trim();
+
+  const [balance, smartMoney, sanctions] = await Promise.all([
+    (chain === "ethereum" ? getEthBalance(address) : getSolBalance(address)).catch((err) => ({
+      error: err.message,
+    })),
+    getWalletSmartMoney(chain, address).catch((err) => ({ error: err.message })),
+    getSanctionsCheck(address, { chain }).catch((err) => ({ error: err.message })),
+  ]);
+
+  let verdict;
+  if (sanctions.sanctioned) {
+    verdict = "high risk -- matches OFAC SDN sanctions list";
+  } else if (sanctions.error) {
+    verdict = `risk unknown -- sanctions check failed (${sanctions.error})`;
+  } else if (typeof smartMoney.score === "number" && smartMoney.score >= 55) {
+    verdict = `low risk, high value -- ${smartMoney.verdict}`;
+  } else if (typeof smartMoney.score === "number" && smartMoney.score >= 25) {
+    verdict = `low risk, moderate value -- ${smartMoney.verdict}`;
+  } else if (typeof smartMoney.score === "number") {
+    verdict = `low risk, low value -- ${smartMoney.verdict}`;
+  } else {
+    verdict = "unable to score value -- see smartMoney.error";
+  }
+
+  return {
+    source: "wallet-risk",
+    chain,
+    address,
+    balance,
+    smartMoney,
+    sanctions,
+    verdict,
+    note: "Composite of wallet balance + wallet-smart-money score + OFAC sanctions-check for eth/sol addresses. See /v1/wallet/balance, /v1/wallet/smart-money, and /v1/compliance/sanctions-check standalone routes for full disclosed detail.",
+    fetchedAt: new Date().toISOString(),
+  };
+}
+
+// Bundle 3: Seller/Domain Trust -- brand-verify's uptime/performance/IP-
+// intel trust score plus x402-seller-trust's Bazaar-listing/manifest/
+// resource-probing reputation for the same domain, combined into one score
+// and verdict. Works for any domain, not just active x402 sellers -- the
+// seller-trust component just reflects "not listed" if it isn't one.
+export async function getDomainTrust(domainRaw) {
+  const domain = String(domainRaw || "").trim().toLowerCase();
+  if (!domain) throw new Error("domain is required");
+
+  const [brand, seller] = await Promise.all([
+    getBrandVerify(domain).catch((err) => ({ error: err.message })),
+    getX402SellerTrust(`https://${domain}`).catch((err) => ({ error: err.message })),
+  ]);
+
+  const brandScore = typeof brand.trustScore === "number" ? brand.trustScore : null;
+  const sellerScore = typeof seller.trustScore === "number" ? seller.trustScore : null;
+  const scores = [brandScore, sellerScore].filter((s) => s !== null);
+  const combinedScore = scores.length ? Math.round(scores.reduce((a, b) => a + b, 0) / scores.length) : null;
+
+  let verdict;
+  if (combinedScore === null) {
+    verdict = "unable to score -- both underlying checks failed, see brandVerify.error / sellerTrust.error";
+  } else if (combinedScore >= 80) {
+    verdict = "high-trust domain";
+  } else if (combinedScore >= 50) {
+    verdict = "moderate-trust domain";
+  } else {
+    verdict = "low-trust domain -- review manually";
+  }
+  if (seller.bazaarListed === false && seller.manifestReachable === false) {
+    verdict +=
+      " (not an active x402 seller -- seller-trust component reflects general reachability/reputation only, not payment-specific signals)";
+  }
+
+  return {
+    source: "domain-trust-composite",
+    domain,
+    combinedScore,
+    verdict,
+    brandVerify: brand,
+    sellerTrust: seller,
+    note: "Composite of /v1/brand-verify (uptime/performance/IP-intel trust score) + /v1/x402/seller-trust (x402-specific reputation via Bazaar listing, manifest reachability, and resource probing) for one domain. See either standalone route for full disclosed detail.",
+    fetchedAt: new Date().toISOString(),
+  };
+}
+
+// Bundle 4: DeFi Pre-Check -- stablecoin depeg status + top yield pools +
+// protocol/chain health score for one protocol or chain, rolled into a
+// quick "anything obviously wrong before I deploy capital here" verdict.
+export async function getDefiPreCheck({
+  protocol: protocolRaw,
+  chain: chainRaw,
+  symbols: symbolsRaw,
+  thresholdPct: thresholdPctRaw,
+  minTvlUsd: minTvlUsdRaw,
+  limit: limitRaw,
+} = {}) {
+  if (!protocolRaw && !chainRaw) {
+    throw new Error("protocol or chain query param is required (used for both the health check and the yields filter)");
+  }
+
+  const [depeg, yields, health] = await Promise.all([
+    getStablecoinDepeg({ symbols: symbolsRaw, thresholdPct: thresholdPctRaw }).catch((err) => ({
+      error: err.message,
+    })),
+    getYieldAggregation({ chain: chainRaw, minTvlUsd: minTvlUsdRaw, limit: limitRaw }).catch((err) => ({
+      error: err.message,
+    })),
+    getProtocolHealth({ protocol: protocolRaw, chain: chainRaw }).catch((err) => ({ error: err.message })),
+  ]);
+
+  const flags = [];
+  if (depeg.anyDepegged) flags.push("one or more relevant stablecoins are depegged right now");
+  if (typeof health.healthScore === "number" && health.healthScore < 50) {
+    flags.push(`${health.mode === "chain" ? "chain" : "protocol"} health score is below 50 (${health.healthScore})`);
+  }
+  if (depeg.error) flags.push(`stablecoin depeg check failed: ${depeg.error}`);
+  if (health.error) flags.push(`health check failed: ${health.error}`);
+
+  const verdict = flags.length === 0 ? "no red flags -- looks safe to proceed" : "review before proceeding";
+
+  return {
+    source: "defi-precheck-composite",
+    protocol: protocolRaw || null,
+    chain: chainRaw || null,
+    verdict,
+    flags,
+    stablecoinDepeg: depeg,
+    topYields: yields.pools || yields,
+    protocolHealth: health,
+    note: "Composite of /v1/stablecoin/depeg-check + /v1/defi/yields + /v1/protocol/health for one protocol or chain -- a quick 'anything obviously wrong before I deploy capital here' check, not exhaustive due diligence.",
+    fetchedAt: new Date().toISOString(),
+  };
+}
+
+// Bundle 5: POKT Network Pulse -- demand-side, supply-side, tokenomics, and
+// all-time throughput signals for Pocket Network (Shannon) in one call
+// instead of four.
+export async function getPoktPulse(limitRaw) {
+  const limit = Math.max(1, Math.min(Math.trunc(Number(limitRaw)) || 10, 50));
+
+  const [demand, suppliers, tokenomics, throughput] = await Promise.all([
+    getPoktServiceDemand(limit).catch((err) => ({ error: err.message })),
+    getPoktSupplierLandscape(limit).catch((err) => ({ error: err.message })),
+    getPoktTokenomics().catch((err) => ({ error: err.message })),
+    getPoktThroughputLeaderboard(limit).catch((err) => ({ error: err.message })),
+  ]);
+
+  return {
+    source: "pokt-network-pulse",
+    serviceDemand: demand,
+    supplierLandscape: suppliers,
+    tokenomics,
+    throughputLeaderboard: throughput,
+    note: "Composite of /v1/pokt/service-demand + /v1/pokt/suppliers + /v1/pokt/tokenomics + /v1/pokt/throughput -- one call for demand-side, supply-side, tokenomics, and all-time throughput signals instead of four. See any of those standalone routes for full disclosed detail.",
+    fetchedAt: new Date().toISOString(),
+  };
+}

@@ -344,14 +344,14 @@ function multiNetworkAccepts(usdAmount) {
 export const routes = {
   "GET /v1/eth/gas-price": {
     accepts: multiNetworkAccepts(0.005),
-    description: "Current Ethereum gas price (wei + gwei)",
+    description: "Current Ethereum gas price (wei + gwei) -- for pre-deploy gas estimation, transaction-cost budgeting, and CI/CD pipelines that need a live gas read before submitting a contract deployment or call.",
     extensions: declareDiscoveryExtension({
       output: { example: { chain: "ethereum", wei: "12345678901", gwei: 12.345678901 } },
     }),
   },
   "GET /v1/eth/latest-block": {
     accepts: multiNetworkAccepts(0.005),
-    description: "Latest Ethereum block number",
+    description: "Latest Ethereum block number -- for confirmation-depth checks, chain-liveness monitoring in CI/CD, and anchoring test fixtures to a known block height.",
     extensions: declareDiscoveryExtension({
       output: { example: { chain: "ethereum", blockNumber: 20123456 } },
     }),
@@ -365,7 +365,7 @@ export const routes = {
   },
   "GET /v1/price/:symbol": {
     accepts: multiNetworkAccepts(0.005),
-    description: "USD price for eth, sol, btc, usdc, or pokt",
+    description: "USD price for eth, sol, btc, usdc, or pokt -- for gas-cost-in-USD estimation and test fixtures that need a live price without hardcoding one.",
     extensions: declareDiscoveryExtension({
       pathParams: { symbol: "eth" },
       pathParamsSchema: {
@@ -377,7 +377,7 @@ export const routes = {
   },
   "GET /v1/wallet/balance/:chain/:address": {
     accepts: multiNetworkAccepts(0.008),
-    description: "Balance for an eth, sol, peaq, or bsc address",
+    description: "Balance for an eth, sol, peaq, or bsc address -- for pre-flight balance checks in deploy scripts, faucet/funding automation, and integration tests that need to confirm a wallet is funded before running.",
     extensions: declareDiscoveryExtension({
       pathParams: { chain: "eth", address: "0x0000000000000000000000000000000000000000" },
       pathParamsSchema: {
@@ -1045,7 +1045,7 @@ export const routes = {
   // Solana RPC spec's own hard 1000-signature cap on getSignaturesForAddress).
   "GET /v1/eth/logs": {
     accepts: multiNetworkAccepts(0.012),
-    description: "Recent Ethereum event logs for a contract/address (bounded to the last 1000 blocks, not full-archive history). Optional whale-transfer filtering: pass decimals + tokenUsdPrice to get an estimated USD value per log, and minUsd to only return logs at or above that value.",
+    description: "Recent Ethereum event logs for a contract/address (bounded to the last 1000 blocks, not full-archive history). Optional whale-transfer filtering: pass decimals + tokenUsdPrice to get an estimated USD value per log, and minUsd to only return logs at or above that value. Useful for smart-contract test suites and CI/CD checks that a deployed contract emitted the expected events.",
     extensions: declareDiscoveryExtension({
       queryParams: {
         properties: {
@@ -1086,7 +1086,7 @@ export const routes = {
   },
   "GET /v1/compliance/sanctions-check/:address": {
     accepts: multiNetworkAccepts(0.015),
-    description: "Screens a wallet address against OFAC's published SDN sanctions list (direct match only, Ethereum or Solana).",
+    description: "Screens a wallet address against OFAC's published SDN sanctions list (direct match only, Ethereum or Solana). Useful as a compliance gate in CI/CD or automated onboarding flows before processing a wallet.",
     extensions: declareDiscoveryExtension({
       pathParams: { address: "0x8576acc5c05d6ce88f4e49bf65bdf0c62f91353c" },
       pathParamsSchema: {
@@ -1210,7 +1210,7 @@ export const routes = {
   },
   "GET /v1/protocol/health": {
     accepts: multiNetworkAccepts(0.02),
-    description: "Composite 0-100 health score for a DeFi protocol (by name/slug) or an entire chain (aggregate across every protocol live on it): TVL scale, 7d TVL momentum, fee-generating efficiency, chain diversification, and token valuation sanity, joined live from DefiLlama's free /protocols, /overview/fees, and /overview/fees?dataType=dailyRevenue endpoints.",
+    description: "Composite 0-100 health score for a DeFi protocol (by name/slug) or an entire chain (aggregate across every protocol live on it): TVL scale, 7d TVL momentum, fee-generating efficiency, chain diversification, and token valuation sanity, joined live from DefiLlama's free /protocols, /overview/fees, and /overview/fees?dataType=dailyRevenue endpoints. Useful for ops dashboards and automated alerting that track a protocol's or chain's health over time.",
     extensions: declareDiscoveryExtension({
       input: { protocol: "lido" },
       inputSchema: {

@@ -902,6 +902,45 @@ node -e 'console.log(JSON.stringify(JSON.parse(Buffer.from(process.argv[1], "bas
 
 Full protocol detail: https://docs.cdp.coinbase.com/x402/quickstart-for-buyers.
 
+## Multi-chain EVM RPC expansion (2026-08-23)
+
+Three new generalized routes: **`GET /v1/chain/:chain/gas-price`**,
+**`GET /v1/chain/:chain/latest-block`** (both **$0.005/call**), and
+**`GET /v1/chain/:chain/balance/:address`** (**$0.008/call**), where
+`:chain` accepts any of 34 EVM chains beyond the eth/bsc/peaq/sol already
+wired up -- Arbitrum, Avalanche, Base, Optimism, Polygon, zkSync, Linea,
+Scroll, Gnosis, Celo, Kava, Moonbeam, and 22 more. Full slug list lives in
+the `POKT_EVM_CHAINS` map in `dataSources.js`.
+
+**Where these came from:** POKT Shannon's free, keyless public gateway
+(`api.pocket.network` -- the same one already backing `ETH_RPC_URL` and
+`BSC_RPC_URL`) publishes a registry of every chain it supports
+([pokt-network/public-rpc](https://github.com/pokt-network/public-rpc)):
+51 mainnet chains as of 2026-06-17, 36 of them EVM-compatible. This project
+was already using 2 of those 36 (eth, bsc); this round adds the other 34 at
+zero additional infra cost -- same gateway, same `rpcCall()` helper, just a
+config-map entry per chain. peaq is not on this gateway (it has its own
+public RPC) so it's unaffected.
+
+**Why 3 generalized routes instead of 68 discrete ones:** the existing
+per-chain pattern (`eth/gas-price`, `bsc/gas-price`, `peaq/gas-price`, ...)
+made sense for 3-4 chains where each is worth surfacing as its own distinct
+product in the catalog. At 34 more chains, replicating that pattern would
+have meant 34 new near-identical functions in `dataSources.js` and 68 new
+route entries in `x402Middleware.js` (gas-price + latest-block, each) --
+mostly bloat, since the logic is byte-for-byte identical across chains.
+Instead this follows the multi-chain path-param pattern already established
+by `wallet/balance`, `compliance/sanctions-check`, and
+`prospect/enrichment`: one route, a `:chain` param, and a config map that's
+a one-line edit to extend later. eth/bsc/sol/peaq keep their existing
+dedicated routes and functions unchanged -- this is additive, not a
+replacement.
+
+Before shipping, a spot-check sample of 8 chains (base, arb-one, poly, avax,
+zksync-era, sei, hyperliquid, xrplevm) was verified live against the real
+gateway (`eth_gasPrice`, HTTP 200, real value returned) rather than trusting
+the registry file alone.
+
 ## Routes and pricing
 
 | Route | Price | What it returns |

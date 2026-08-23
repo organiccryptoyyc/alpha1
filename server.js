@@ -57,6 +57,9 @@ import {
   getSecEdgarFundamentals,
   getWalletSmartMoney,
   getProspectEnrichment,
+  getChainGasPrice,
+  getChainLatestBlock,
+  getChainBalance,
 } from "./dataSources.js";
 
 const app = express();
@@ -445,6 +448,38 @@ app.get("/v1/wallet/balance/:chain/:address", async (req, res, next) => {
         : null;
     if (!fn) return res.status(400).json({ error: "chain must be 'eth', 'sol', 'peaq', or 'bsc'" });
     res.json(await cached(key, 6, fn));
+  } catch (err) {
+    next(err);
+  }
+});
+
+// Multi-chain EVM RPC snapshots (2026-08-23). Generalized routes covering
+// the 34 additional EVM chains on POKT's free gateway -- see the
+// POKT_EVM_CHAINS map in dataSources.js for the full slug list. Same cache
+// TTLs as the equivalent single-chain routes above (gas-price 5s,
+// latest-block 8s, balance 6s).
+app.get("/v1/chain/:chain/gas-price", async (req, res, next) => {
+  try {
+    const { chain } = req.params;
+    res.json(await cached(`chain:gas:${chain}`, 5, () => getChainGasPrice(chain)));
+  } catch (err) {
+    next(err);
+  }
+});
+
+app.get("/v1/chain/:chain/latest-block", async (req, res, next) => {
+  try {
+    const { chain } = req.params;
+    res.json(await cached(`chain:block:${chain}`, 8, () => getChainLatestBlock(chain)));
+  } catch (err) {
+    next(err);
+  }
+});
+
+app.get("/v1/chain/:chain/balance/:address", async (req, res, next) => {
+  try {
+    const { chain, address } = req.params;
+    res.json(await cached(`chain:bal:${chain}:${address}`, 6, () => getChainBalance(chain, address)));
   } catch (err) {
     next(err);
   }

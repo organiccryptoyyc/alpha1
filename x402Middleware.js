@@ -1313,6 +1313,56 @@ export const routes = {
       },
     }),
   },
+  "GET /v1/chain/:chain/gas-price": {
+    accepts: multiNetworkAccepts(0.005),
+    description:
+      "Current gas price (wei + gwei) for any of 34 additional EVM chains on POKT's free public gateway -- Arbitrum, Avalanche, Base, Optimism, Polygon, zkSync, Linea, Scroll, Gnosis, and 25 more (see /v1/chain/:chain/gas-price docs for the full slug list). Same use cases as eth/gas-price -- pre-deploy gas estimation, transaction-cost budgeting, CI/CD pipelines -- extended across chains agents and deploy scripts already work with beyond mainnet Ethereum.",
+    extensions: declareDiscoveryExtension({
+      pathParams: { chain: "base" },
+      pathParamsSchema: {
+        properties: {
+          chain: {
+            type: "string",
+            description:
+              "POKT gateway EVM chain slug, e.g. base, arb-one, avax, op, poly, linea, scroll, gnosis, zksync-era, celo, kava, moonbeam (34 total)",
+          },
+        },
+        required: ["chain"],
+      },
+      output: { example: { chain: "base", chainName: "Base", wei: "12345678", gwei: 0.012345678 } },
+    }),
+  },
+  "GET /v1/chain/:chain/latest-block": {
+    accepts: multiNetworkAccepts(0.005),
+    description:
+      "Latest block number for any of the same 34 EVM chains as /v1/chain/:chain/gas-price. For confirmation-depth checks, chain-liveness monitoring, and anchoring test fixtures to a known block height across L2s and sidechains, not just Ethereum mainnet.",
+    extensions: declareDiscoveryExtension({
+      pathParams: { chain: "base" },
+      pathParamsSchema: {
+        properties: {
+          chain: { type: "string", description: "POKT gateway EVM chain slug -- same 34 as gas-price above" },
+        },
+        required: ["chain"],
+      },
+      output: { example: { chain: "base", chainName: "Base", blockNumber: 20123456 } },
+    }),
+  },
+  "GET /v1/chain/:chain/balance/:address": {
+    accepts: multiNetworkAccepts(0.008),
+    description:
+      "Native-token balance for an address on any of the same 34 EVM chains. For pre-flight balance checks in multi-chain deploy scripts, faucet/funding automation, and integration tests that need to confirm a wallet is funded on a specific L2 before running. For eth/sol/peaq/bsc specifically, use /v1/wallet/balance instead -- this route covers the other 34.",
+    extensions: declareDiscoveryExtension({
+      pathParams: { chain: "base", address: "0x0000000000000000000000000000000000000000" },
+      pathParamsSchema: {
+        properties: {
+          chain: { type: "string", description: "POKT gateway EVM chain slug -- same 34 as gas-price/latest-block above" },
+          address: { type: "string", description: "wallet address on the given chain" },
+        },
+        required: ["chain", "address"],
+      },
+      output: { example: { chain: "base", chainName: "Base", address: "0x...", native: 1.2345 } },
+    }),
+  },
 };
 
 export function buildX402Middleware() {

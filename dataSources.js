@@ -3399,3 +3399,116 @@ export async function getProspectEnrichment(chainRaw, addressRaw, domainRaw) {
     fetchedAt: new Date().toISOString(),
   };
 }
+
+// --- Multi-chain EVM RPC snapshots (2026-08-23) -----------------------------
+// POKT Shannon's free, keyless public gateway (api.pocket.network -- the same
+// one already backing ETH_RPC_URL/BSC_RPC_URL above) supports 51 mainnet
+// chains today (verified live against the gateway's own published registry,
+// pokt-network/public-rpc's supported-chains.json, 2026-08-23), of which 36
+// are EVM-compatible. Rather than hand-writing 34 more getXGasPrice() /
+// getXLatestBlock() near-duplicates of the eth/bsc/peaq functions above (and
+// 34 more route entries in x402Middleware.js to match), this generalizes:
+// one chain-config map plus three parameterized functions cover every chain
+// in the map, present and future -- adding a chain later is a one-line
+// addition to POKT_EVM_CHAINS, not a new function and a new route. This
+// mirrors the multi-chain path-param pattern already used by
+// wallet/balance, compliance/sanctions-check, and prospect/enrichment,
+// rather than the earlier one-route-per-chain pattern eth/bsc/peaq set --
+// with 34 chains at once, one-route-per-chain would have roughly tripled
+// the size of the route catalog for routes that are otherwise identical.
+//
+// peaq is NOT on this gateway (it has its own public RPC, see PEAQ_RPC_URL
+// above) so it's unaffected by this map. eth and bsc are already wired to
+// this same gateway via ETH_RPC_URL/BSC_RPC_URL and keep their existing
+// dedicated routes/functions rather than being duplicated into this map.
+//
+// Every URL below verified live 2026-08-23 (eth_gasPrice returned a real
+// value, HTTP 200) for a spot-check sample (base, arb-one, poly, avax,
+// zksync-era, sei, hyperliquid, xrplevm) before shipping the full list --
+// all 34 follow the identical https://<slug>.api.pocket.network pattern
+// from the same published registry, so the sample stands in for the set.
+const POKT_EVM_CHAINS = {
+  "arb-one": { name: "Arbitrum", rpcUrl: "https://arb-one.api.pocket.network" },
+  avax: { name: "Avalanche (C-Chain)", rpcUrl: "https://avax.api.pocket.network" },
+  base: { name: "Base", rpcUrl: "https://base.api.pocket.network" },
+  bera: { name: "Berachain", rpcUrl: "https://bera.api.pocket.network" },
+  blast: { name: "Blast", rpcUrl: "https://blast.api.pocket.network" },
+  boba: { name: "Boba", rpcUrl: "https://boba.api.pocket.network" },
+  celo: { name: "Celo", rpcUrl: "https://celo.api.pocket.network" },
+  fantom: { name: "Fantom", rpcUrl: "https://fantom.api.pocket.network" },
+  fraxtal: { name: "Fraxtal", rpcUrl: "https://fraxtal.api.pocket.network" },
+  fuse: { name: "Fuse", rpcUrl: "https://fuse.api.pocket.network" },
+  gnosis: { name: "Gnosis", rpcUrl: "https://gnosis.api.pocket.network" },
+  harmony: { name: "Harmony", rpcUrl: "https://harmony.api.pocket.network" },
+  hyperliquid: { name: "Hyperliquid", rpcUrl: "https://hyperliquid.api.pocket.network" },
+  ink: { name: "Ink", rpcUrl: "https://ink.api.pocket.network" },
+  iotex: { name: "IoTeX", rpcUrl: "https://iotex.api.pocket.network" },
+  kaia: { name: "Kaia", rpcUrl: "https://kaia.api.pocket.network" },
+  kava: { name: "Kava", rpcUrl: "https://kava.api.pocket.network" },
+  linea: { name: "Linea", rpcUrl: "https://linea.api.pocket.network" },
+  metis: { name: "Metis", rpcUrl: "https://metis.api.pocket.network" },
+  moonbeam: { name: "Moonbeam", rpcUrl: "https://moonbeam.api.pocket.network" },
+  moonriver: { name: "Moonriver", rpcUrl: "https://moonriver.api.pocket.network" },
+  oasys: { name: "Oasys", rpcUrl: "https://oasys.api.pocket.network" },
+  opbnb: { name: "opBNB", rpcUrl: "https://opbnb.api.pocket.network" },
+  op: { name: "Optimism", rpcUrl: "https://op.api.pocket.network" },
+  poly: { name: "Polygon", rpcUrl: "https://poly.api.pocket.network" },
+  "poly-zkevm": { name: "Polygon zkEVM", rpcUrl: "https://poly-zkevm.api.pocket.network" },
+  scroll: { name: "Scroll", rpcUrl: "https://scroll.api.pocket.network" },
+  sei: { name: "Sei", rpcUrl: "https://sei.api.pocket.network" },
+  sonic: { name: "Sonic", rpcUrl: "https://sonic.api.pocket.network" },
+  taiko: { name: "Taiko", rpcUrl: "https://taiko.api.pocket.network" },
+  unichain: { name: "Unichain", rpcUrl: "https://unichain.api.pocket.network" },
+  xrplevm: { name: "XRPL EVM", rpcUrl: "https://xrplevm.api.pocket.network" },
+  "zklink-nova": { name: "zkLink", rpcUrl: "https://zklink-nova.api.pocket.network" },
+  "zksync-era": { name: "zkSync", rpcUrl: "https://zksync-era.api.pocket.network" },
+};
+
+function resolvePoktEvmChain(slugRaw) {
+  const slug = String(slugRaw || "").trim().toLowerCase();
+  const chain = POKT_EVM_CHAINS[slug];
+  if (!chain) {
+    throw new Error(
+      `unsupported chain "${slugRaw}" -- supported: ${Object.keys(POKT_EVM_CHAINS).join(", ")}`
+    );
+  }
+  return { slug, ...chain };
+}
+
+export async function getChainGasPrice(slugRaw) {
+  const { slug, name, rpcUrl } = resolvePoktEvmChain(slugRaw);
+  const hex = await rpcCall(rpcUrl, "eth_gasPrice");
+  const wei = BigInt(hex);
+  return {
+    chain: slug,
+    chainName: name,
+    wei: wei.toString(),
+    gwei: Number(wei) / 1e9,
+    fetchedAt: new Date().toISOString(),
+  };
+}
+
+export async function getChainLatestBlock(slugRaw) {
+  const { slug, name, rpcUrl } = resolvePoktEvmChain(slugRaw);
+  const hex = await rpcCall(rpcUrl, "eth_blockNumber");
+  return {
+    chain: slug,
+    chainName: name,
+    blockNumber: parseInt(hex, 16),
+    fetchedAt: new Date().toISOString(),
+  };
+}
+
+export async function getChainBalance(slugRaw, address) {
+  const { slug, name, rpcUrl } = resolvePoktEvmChain(slugRaw);
+  const hex = await rpcCall(rpcUrl, "eth_getBalance", [address, "latest"]);
+  const wei = BigInt(hex);
+  return {
+    chain: slug,
+    chainName: name,
+    address,
+    wei: wei.toString(),
+    native: Number(wei) / 1e18,
+    fetchedAt: new Date().toISOString(),
+  };
+}

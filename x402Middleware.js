@@ -1261,6 +1261,27 @@ export const routes = {
       },
     }),
   },
+  "GET /v1/wallet/smart-money/:chain/:address": {
+    accepts: multiNetworkAccepts(0.02),
+    description:
+      "Wallet activity/balance heuristic score (0-100) from free RPC primitives -- USD balance tier, transaction-count activity, and (Solana only) recency. Not an entity-labeled 'smart money' database like Nansen/Arkham -- a transparent, documented formula. Supports chain=ethereum or chain=solana.",
+    extensions: declareDiscoveryExtension({
+      pathParams: { chain: "ethereum", address: "0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045" },
+      pathParamsSchema: {
+        properties: {
+          chain: { type: "string", description: "ethereum or solana" },
+          address: { type: "string", description: "wallet address on the given chain" },
+        },
+        required: ["chain", "address"],
+      },
+      queryParams: {
+        properties: {},
+      },
+      output: {
+        example: { source: "wallet-smart-money", chain: "ethereum", score: 62, verdict: "active, meaningful balance" },
+      },
+    }),
+  },
 };
 
 export function buildX402Middleware() {

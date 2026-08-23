@@ -787,6 +787,34 @@ Following the currency/PDF/OCR build round, researched the top 10 aggregated-dat
 
 No build has started on any of these 10 items -- this section is a planning note only. Each item still needs explicit go-ahead before work begins, per the research -> rank -> document -> build-on-sign-off pattern used throughout this repo's history.
 
+## SEC EDGAR company fundamentals (2026-08-23)
+
+New route: **`GET /v1/sec/fundamentals/:ticker`**, priced at **$0.02/call** --
+in line with the other composite/aggregated-data routes (protocol-health,
+NFT-collection-analytics), reflecting that this chains three upstream calls
+per lookup rather than one.
+
+Built on SEC EDGAR's free, keyless JSON APIs (`data.sec.gov`, `www.sec.gov`)
+-- no API key required, just a declared `User-Agent` identifying the caller
+(SEC 403s "undeclared automated tool" requests without one; set via
+`SEC_EDGAR_USER_AGENT`, defaults to a contact-email-bearing string). Rate
+limit is 10 req/s per IP, well above what this route needs.
+
+Three chained calls per lookup: (1) the ticker-to-CIK map
+(`company_tickers.json`, ~800KB, cached in-process for 24h -- same
+shared-not-per-request caching discipline as the OFAC list loader), (2) the
+submissions API for filing history and company metadata, (3) the XBRL
+company-facts API for financials. Only a curated set of the most-requested
+us-gaap concepts are surfaced (revenue, net income, total assets/liabilities,
+stockholders' equity, basic/diluted EPS, cash) -- the raw company-facts
+payload is enormous. Server-side response is cached for 6h, since filing
+data only changes a few times a year per company.
+
+Coverage caveat: SEC's ticker map only includes SEC-registered filers
+(US-listed companies and some foreign private issuers), not every
+exchange-listed ticker -- a lookup for an unlisted/foreign symbol returns a
+clear "no SEC-registered company found" error rather than a partial result.
+
 ## Routes and pricing
 
 | Route | Price | What it returns |

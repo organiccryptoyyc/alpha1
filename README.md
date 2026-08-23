@@ -840,6 +840,68 @@ brand_verify's Tranco-rank fold-in. Supports `chain=ethereum` or
 shorter than the other composite routes' since balance and activity change
 in real time and the whole point of this route is current state.
 
+## Prospect enrichment for CRM/sales agents (2026-08-23)
+
+New route: **`GET /v1/prospect/enrichment/:chain/:address`**, priced at
+**$0.03/call**. Built for CRM and sales-outreach agents working web3 leads,
+who typically have a wallet address on hand (from an on-chain interaction,
+a Discord/Twitter tip-jar link, a token-gated signup form) and sometimes a
+company domain, but not much else.
+
+Bundles three existing signals into one call instead of three separate paid
+requests: `wallet-smart-money` (is this wallet worth pursuing),
+`sanctions-check` (is it clean -- a hard stop, not just a scoring input),
+and, if a domain is supplied via `?domain=`, a Tranco domain-rank lookup (is
+the associated company a real, established site). Domain is optional: a
+wallet-only lead, the common case, still gets a full score and verdict,
+just without the `domainRank` field.
+
+Deliberately does **not** call the full `/v1/brand-verify` pipeline for the
+domain check -- that route wraps UpRock's multi-region screenshots and IP
+geolocation and is priced at $0.23 for that reason, a heavier trust/safety
+audit that doesn't belong bundled into a lightweight lead-scoring call.
+Instead it reuses `getTrancoRank()` directly, the same free, keyless Tranco
+lookup already folded into `brand_verify` -- fast and appropriately scoped
+for "is this a real company" rather than "is this site live, performant,
+and hosted where it claims to be."
+
+Returns a single `verdict` and `recommendedAction` (`prioritize outreach` /
+`standard outreach` / `deprioritize or skip` / `block`) rather than three
+raw payloads an agent would have to reconcile itself. 2-minute cache,
+matching the short-lived nature of the wallet-activity score it wraps.
+
+## Discoverability for coding/dev agents (2026-08-23)
+
+A handful of existing routes are also useful to software-engineering and
+coding agents, not just trading/monitoring bots -- `eth/gas-price`,
+`eth/latest-block`, `wallet/balance/:chain/:address`, `price/:symbol`,
+`eth/logs`, `protocol/health`, and `compliance/sanctions-check/:address`
+cover pre-deploy gas estimation, confirmation-depth checks, funded-wallet
+pre-flight checks, smart-contract test/CI verification that expected events
+fired, and compliance gates in automated onboarding flows. Their
+`declareDiscoveryExtension` `description` fields were rewritten this round
+to name these use cases explicitly, since that's the text agent tool-search
+actually matches against on Bazaar -- the routes and pricing didn't change,
+only what they say about themselves.
+
+Quickstart for an agent hitting this from code (no SDK required to see the
+shape, though most agents will use an x402 client library to build the
+actual payment):
+
+```bash
+# 1. First call gets a 402 with payment requirements
+curl -s -D- https://<your-host>/v1/eth/gas-price -o /dev/null | grep -i payment-required
+
+# 2. Decode the header to see price/network/description
+node -e 'console.log(JSON.stringify(JSON.parse(Buffer.from(process.argv[1], "base64")), null, 2))' "<payment-required-header-value>"
+
+# 3. Retry with an X-PAYMENT header carrying a signed payment -- most agents
+#    use a client library (e.g. @x402/fetch) to build this rather than
+#    hand-rolling it
+```
+
+Full protocol detail: https://docs.cdp.coinbase.com/x402/quickstart-for-buyers.
+
 ## Routes and pricing
 
 | Route | Price | What it returns |

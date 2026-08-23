@@ -815,6 +815,31 @@ Coverage caveat: SEC's ticker map only includes SEC-registered filers
 exchange-listed ticker -- a lookup for an unlisted/foreign symbol returns a
 clear "no SEC-registered company found" error rather than a partial result.
 
+## Wallet smart-money scoring (2026-08-23)
+
+New route: **`GET /v1/wallet/smart-money/:chain/:address`**, priced at
+**$0.02/call**, same tier as the other composite routes. This is the last
+item from the original three-item priority list (POKT RPC swap, SEC EDGAR,
+wallet scoring) -- all three are now shipped.
+
+Deliberately scoped honestly: this is **not** an entity-labeled "smart
+money" database like Nansen or Arkham, which rely on curated wallet-tagging
+data this project doesn't have. What it is: a transparent, documented 0-100
+heuristic built entirely from the same free RPC primitives already powering
+`getEthBalance`/`getSolBalance`, `eth/logs`, and `sol/history` --
+current USD-denominated balance (tiered), an activity count (Ethereum nonce
+as an outgoing-tx-count proxy; Solana signature count over the most recent
+100 transactions), and -- Solana only, since Ethereum's JSON-RPC has no cheap
+path to a wallet's last-active timestamp without an indexer -- how recently
+the wallet was last active. The score breakdown and formula are returned in
+the response (`scoreBreakdown`), not just asserted, matching the disclosure
+pattern used by x402_seller_trust's settlement-volume signal and
+brand_verify's Tranco-rank fold-in. Supports `chain=ethereum` or
+`chain=solana`; an address that resolves to a contract (checked via
+`eth_getCode`) is flagged rather than scored like an EOA. 5-minute cache,
+shorter than the other composite routes' since balance and activity change
+in real time and the whole point of this route is current state.
+
 ## Routes and pricing
 
 | Route | Price | What it returns |

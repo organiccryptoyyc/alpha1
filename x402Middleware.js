@@ -1363,6 +1363,88 @@ export const routes = {
       output: { example: { chain: "base", chainName: "Base", address: "0x...", native: 1.2345 } },
     }),
   },
+  "GET /v1/yield/best-opportunities/:address": {
+    accepts: multiNetworkAccepts(0.25),
+    description:
+      "Answers 'where should I stake or add liquidity right now, and what would I actually earn': scans native-token balance across all 37 EVM chains this API supports, prices whatever's non-dust to USD, pulls live DefiLlama yield pools (Uniswap, PancakeSwap, Stargate, Aerodrome, and effectively every major DEX/lending protocol in one source) for each chain with a balance, and returns the top 3 opportunities ranked by projected 12-month USD earnings -- with APY, native-token-equivalent earnings, and estimated gas cost to enter each position. No KYC, no wallet connection -- just an address. Informational only; see the disclaimer field in the response.",
+    extensions: declareDiscoveryExtension({
+      pathParams: { address: "0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045" },
+      pathParamsSchema: {
+        properties: {
+          address: { type: "string", description: "EVM wallet address (checked across all 37 supported EVM chains)" },
+        },
+        required: ["address"],
+      },
+      queryParams: { properties: {} },
+      output: {
+        example: {
+          source: "yield-opportunities",
+          address: "0x...",
+          chainsWithBalance: [{ chain: "base", nativeSymbol: "ETH", balance: 1.2, balanceUsd: 3456.78 }],
+          topOpportunities: [
+            {
+              rank: 1,
+              chain: "base",
+              protocol: "aerodrome",
+              pool: "USDC-ETH",
+              apy: 24.3,
+              projected12moEarningsUsd: 840.24,
+              estGasCostToEnter: { usd: 1.85 },
+            },
+          ],
+        },
+      },
+    }),
+  },
+  "GET /v1/yield/best-opportunities/solana/:address": {
+    accepts: multiNetworkAccepts(0.25),
+    description:
+      "Same 'where should I stake/LP' recommendation as /v1/yield/best-opportunities, scoped to a single Solana address: SOL balance, live DefiLlama Solana yield pools, top 3 ranked by projected 12-month USD earnings with APY and SOL-equivalent earnings noted. No KYC required. Informational only; see the disclaimer field in the response.",
+    extensions: declareDiscoveryExtension({
+      pathParams: { address: "9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM" },
+      pathParamsSchema: {
+        properties: {
+          address: { type: "string", description: "Solana wallet address (base58)" },
+        },
+        required: ["address"],
+      },
+      queryParams: { properties: {} },
+      output: {
+        example: {
+          source: "yield-opportunities-solana",
+          address: "...",
+          balance: 12.5,
+          balanceUsd: 1875.0,
+          topOpportunities: [{ rank: 1, protocol: "kamino", pool: "SOL-USDC", apy: 18.2, projected12moEarningsUsd: 341.25 }],
+        },
+      },
+    }),
+  },
+  "GET /v1/yield/best-opportunities/combined/:address/:solAddress": {
+    accepts: multiNetworkAccepts(0.3),
+    description:
+      "Bundled version of /v1/yield/best-opportunities and its Solana counterpart: scans an EVM address across 37 chains AND a Solana address in one call, then ranks the top 3 opportunities globally across the wallet's entire EVM + Solana footprint by projected 12-month USD earnings. Priced as a bundle ($0.30) rather than the sum of the two standalone routes ($0.25 each) -- use this when you have both addresses for the same user and want one ranked answer instead of two separate calls to merge yourself.",
+    extensions: declareDiscoveryExtension({
+      pathParams: {
+        address: "0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045",
+        solAddress: "9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM",
+      },
+      pathParamsSchema: {
+        properties: {
+          address: { type: "string", description: "EVM wallet address" },
+          solAddress: { type: "string", description: "Solana wallet address (base58)" },
+        },
+        required: ["address", "solAddress"],
+      },
+      queryParams: { properties: {} },
+      output: {
+        example: {
+          source: "yield-opportunities-combined",
+          topOpportunities: [{ rank: 1, chain: "solana", protocol: "kamino", pool: "SOL-USDC", apy: 18.2, projected12moEarningsUsd: 341.25 }],
+        },
+      },
+    }),
+  },
 };
 
 export function buildX402Middleware() {

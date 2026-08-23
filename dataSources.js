@@ -3512,3 +3512,372 @@ export async function getChainBalance(slugRaw, address) {
     fetchedAt: new Date().toISOString(),
   };
 }
+
+// --- Yield/staking opportunity recommender (2026-08-23) --------------------
+// Answers the single most valuable question a DeFi-facing agent asks:
+// "where should I stake/LP right now, and what would I actually earn."
+// Pure orchestration over data this project already has live -- native
+// balance across all 38 chains (eth/sol/bsc/peaq + the 34 POKT EVM chains),
+// live gas price per chain, and DefiLlama's free yields index
+// (getYieldAggregation above, already covering Uniswap/PancakeSwap/
+// Stargate/Aerodrome/effectively every major DEX and lending protocol) --
+// joined into one top-3 ranked recommendation. No new external data source
+// except one small addition: a native-token price map, since USD-comparable
+// ranking across 38 different gas tokens needs a price for each. Every
+// CoinGecko id below verified live 2026-08-23; DefiLlama's chain-name
+// mapping verified live the same day against api.llama.fi/chains -- several
+// diverge from the slug/name used elsewhere in this file, e.g.
+// gnosis -> "xDai", kaia -> "Klaytn" (DefiLlama hasn't renamed it yet),
+// opbnb -> "Op_Bnb", hyperliquid -> "Hyperliquid L1".
+const NATIVE_TOKEN_COINGECKO_ID = {
+  eth: "ethereum",
+  sol: "solana",
+  bsc: "binancecoin",
+  peaq: "peaq-2",
+  "arb-one": "ethereum",
+  avax: "avalanche-2",
+  base: "ethereum",
+  bera: "berachain-bera",
+  blast: "ethereum",
+  boba: "ethereum",
+  celo: "celo",
+  fantom: "fantom",
+  fraxtal: "frax-ether",
+  fuse: "fuse-network-token",
+  gnosis: "xdai",
+  harmony: "harmony",
+  hyperliquid: "hyperliquid",
+  ink: "ethereum",
+  iotex: "iotex",
+  kaia: "kaia",
+  kava: "kava",
+  linea: "ethereum",
+  metis: "metis-token",
+  moonbeam: "moonbeam",
+  moonriver: "moonriver",
+  oasys: "oasys",
+  opbnb: "binancecoin",
+  op: "ethereum",
+  poly: "matic-network",
+  "poly-zkevm": "ethereum",
+  scroll: "ethereum",
+  sei: "sei-network",
+  sonic: "sonic-3",
+  taiko: "ethereum",
+  unichain: "ethereum",
+  xrplevm: "ripple",
+  "zklink-nova": "ethereum",
+  "zksync-era": "ethereum",
+};
+
+const NATIVE_TOKEN_SYMBOL = {
+  eth: "ETH", sol: "SOL", bsc: "BNB", peaq: "PEAQ",
+  "arb-one": "ETH", avax: "AVAX", base: "ETH", bera: "BERA", blast: "ETH",
+  boba: "ETH", celo: "CELO", fantom: "FTM", fraxtal: "frxETH", fuse: "FUSE",
+  gnosis: "xDAI", harmony: "ONE", hyperliquid: "HYPE", ink: "ETH",
+  iotex: "IOTX", kaia: "KAIA", kava: "KAVA", linea: "ETH", metis: "METIS",
+  moonbeam: "GLMR", moonriver: "MOVR", oasys: "OAS", opbnb: "BNB", op: "ETH",
+  poly: "POL", "poly-zkevm": "ETH", scroll: "ETH", sei: "SEI", sonic: "S",
+  taiko: "ETH", unichain: "ETH", xrplevm: "XRP", "zklink-nova": "ETH",
+  "zksync-era": "ETH",
+};
+
+// DefiLlama's own chain display name, for filtering getYieldAggregation's
+// pool index.
+const DEFILLAMA_CHAIN_NAME = {
+  eth: "Ethereum", sol: "Solana", bsc: "Binance", peaq: "Peaq",
+  "arb-one": "Arbitrum", avax: "Avalanche", base: "Base", bera: "Berachain",
+  blast: "Blast", boba: "Boba", celo: "Celo", fantom: "Fantom",
+  fraxtal: "Fraxtal", fuse: "Fuse", gnosis: "xDai", harmony: "Harmony",
+  hyperliquid: "Hyperliquid L1", ink: "Ink", iotex: "IoTeX", kaia: "Klaytn",
+  kava: "Kava", linea: "Linea", metis: "Metis", moonbeam: "Moonbeam",
+  moonriver: "Moonriver", oasys: "Oasys", opbnb: "Op_Bnb", op: "Optimism",
+  poly: "Polygon", "poly-zkevm": "Polygon zkEVM", scroll: "Scroll",
+  sei: "Sei", sonic: "Sonic", taiko: "Taiko", unichain: "Unichain",
+  xrplevm: "XRPL EVM", "zklink-nova": "zkLink", "zksync-era": "zkSync Era",
+};
+
+const YIELD_ENTRY_GAS_UNITS = 150000; // rough single swap/stake tx estimate, documented as approximate below
+const YIELD_DUST_THRESHOLD_USD = 1;
+
+const YIELD_DISCLAIMER =
+  "Informational only, not financial advice. APY figures are live snapshots from DefiLlama and change constantly -- projected earnings assume the current rate holds for the full period and are not guaranteed. Gas cost is a rough single-swap estimate (150,000 gas units at current gas price); actual cost depends on the specific protocol/route used. Smart-contract risk, impermanent-loss risk (for LP pools), and price risk on the underlying assets all apply. You are responsible for executing and accepting any resulting transaction.";
+
+async function getNativeTokenPricesUsd(coingeckoIds) {
+  const uniqueIds = [...new Set(coingeckoIds)].filter(Boolean);
+  if (uniqueIds.length === 0) return {};
+  const res = await fetch(
+    `https://api.coingecko.com/api/v3/simple/price?ids=${uniqueIds.join(",")}&vs_currencies=usd`
+  );
+  if (!res.ok) throw new Error(`CoinGecko failed: HTTP ${res.status}`);
+  const json = await res.json();
+  const out = {};
+  for (const id of uniqueIds) out[id] = json[id]?.usd ?? null;
+  return out;
+}
+
+async function getNativeBalanceForSlug(slug, address) {
+  if (slug === "eth") return (await getEthBalance(address)).eth;
+  if (slug === "bsc") return (await getBscBalance(address)).bnb;
+  if (slug === "peaq") return (await getPeaqBalance(address)).peaq;
+  return (await getChainBalance(slug, address)).native;
+}
+
+async function getGasGweiForSlug(slug) {
+  if (slug === "eth") return (await getEthGasPrice()).gwei;
+  if (slug === "bsc") return (await getBscGasPrice()).gwei;
+  if (slug === "peaq") return (await getPeaqGasPrice()).gwei;
+  return (await getChainGasPrice(slug)).gwei;
+}
+
+async function rankedYieldCandidatesForChain(slug, balanceUsd, nativeSymbol, balance, priceUsd) {
+  const defiLlamaChain = DEFILLAMA_CHAIN_NAME[slug];
+  if (!defiLlamaChain) return [];
+  let pools = [];
+  try {
+    const agg = await getYieldAggregation({ chain: defiLlamaChain, limit: 5 });
+    pools = agg.pools;
+  } catch {
+    return [];
+  }
+  if (!pools.length) return [];
+  const gwei = await getGasGweiForSlug(slug).catch(() => null);
+  const gasCostNative = gwei != null ? (gwei * YIELD_ENTRY_GAS_UNITS) / 1e9 : null;
+  const gasCostUsd = gasCostNative != null && priceUsd != null ? gasCostNative * priceUsd : null;
+  return pools.map((pool) => {
+    const apy = pool.apy || 0;
+    const projected6moUsd = balanceUsd != null ? balanceUsd * (apy / 100) * 0.5 : null;
+    const projected12moUsd = balanceUsd != null ? balanceUsd * (apy / 100) : null;
+    return {
+      chain: slug,
+      chainNativeSymbol: nativeSymbol,
+      walletBalance: balance,
+      walletBalanceUsd: balanceUsd,
+      protocol: pool.project,
+      pool: pool.symbol,
+      apy,
+      tvlUsd: pool.tvlUsd,
+      projected6moEarningsUsd: projected6moUsd,
+      projected12moEarningsUsd: projected12moUsd,
+      projected12moEarningsNative:
+        priceUsd && projected12moUsd != null ? projected12moUsd / priceUsd : null,
+      projectedReturnNote: `~${apy.toFixed(2)}% APY at current live rate (not compounded, not guaranteed)`,
+      estGasCostToEnter: {
+        gasUnits: YIELD_ENTRY_GAS_UNITS,
+        native: gasCostNative,
+        usd: gasCostUsd,
+        symbol: nativeSymbol,
+      },
+      ilRisk: pool.ilRisk,
+      stablecoin: pool.stablecoin,
+    };
+  });
+}
+
+function isValidEvmAddress(address) {
+  return /^0x[a-fA-F0-9]{40}$/.test(String(address || "").trim());
+}
+
+function isValidSolAddress(address) {
+  return /^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(String(address || "").trim());
+}
+
+// EVM side: scans native balance across all 37 EVM-reachable chains we
+// support (eth/bsc/peaq + the 34 POKT chains), prices whatever's non-dust
+// to USD, pulls each chain-with-balance's top DefiLlama pools, and ranks
+// every candidate opportunity globally by projected 12-month USD earnings.
+export async function getYieldOpportunities(addressRaw) {
+  const address = String(addressRaw || "").trim();
+  if (!isValidEvmAddress(address)) {
+    throw new Error("invalid EVM address -- expected a 0x-prefixed 40-hex-character address");
+  }
+  const evmSlugs = Object.keys(NATIVE_TOKEN_COINGECKO_ID).filter((s) => s !== "sol");
+
+  const balanceResults = await Promise.allSettled(
+    evmSlugs.map(async (slug) => ({ slug, native: await getNativeBalanceForSlug(slug, address) }))
+  );
+  const held = balanceResults
+    .filter((r) => r.status === "fulfilled" && r.value.native > 0)
+    .map((r) => r.value);
+
+  if (held.length === 0) {
+    return {
+      source: "yield-opportunities",
+      address,
+      chainsScanned: evmSlugs.length,
+      chainsWithBalance: [],
+      topOpportunities: [],
+      note: `No non-zero native balance found on any of the ${evmSlugs.length} supported EVM chains for this address.`,
+      disclaimer: YIELD_DISCLAIMER,
+      fetchedAt: new Date().toISOString(),
+    };
+  }
+
+  const priceIds = held.map((h) => NATIVE_TOKEN_COINGECKO_ID[h.slug]);
+  const prices = await getNativeTokenPricesUsd(priceIds);
+
+  const chainsWithBalance = held
+    .map((h) => {
+      const priceUsd = prices[NATIVE_TOKEN_COINGECKO_ID[h.slug]] ?? null;
+      const balanceUsd = priceUsd != null ? h.native * priceUsd : null;
+      return {
+        chain: h.slug,
+        nativeSymbol: NATIVE_TOKEN_SYMBOL[h.slug],
+        balance: h.native,
+        priceUsd,
+        balanceUsd,
+      };
+    })
+    .filter((c) => c.balanceUsd === null || c.balanceUsd >= YIELD_DUST_THRESHOLD_USD);
+
+  if (chainsWithBalance.length === 0) {
+    return {
+      source: "yield-opportunities",
+      address,
+      chainsScanned: evmSlugs.length,
+      chainsWithBalance: [],
+      topOpportunities: [],
+      note: `Non-zero balance found but all below the $${YIELD_DUST_THRESHOLD_USD} dust threshold.`,
+      disclaimer: YIELD_DISCLAIMER,
+      fetchedAt: new Date().toISOString(),
+    };
+  }
+
+  const perChainCandidates = await Promise.all(
+    chainsWithBalance.map((c) =>
+      rankedYieldCandidatesForChain(c.chain, c.balanceUsd, c.nativeSymbol, c.balance, c.priceUsd)
+    )
+  );
+  const candidates = perChainCandidates.flat();
+  candidates.sort((a, b) => (b.projected12moEarningsUsd || 0) - (a.projected12moEarningsUsd || 0));
+  const topOpportunities = candidates.slice(0, 3).map((c, i) => ({ rank: i + 1, ...c }));
+
+  return {
+    source: "yield-opportunities",
+    address,
+    chainsScanned: evmSlugs.length,
+    chainsWithBalance: chainsWithBalance.map((c) => ({
+      chain: c.chain,
+      nativeSymbol: c.nativeSymbol,
+      balance: c.balance,
+      balanceUsd: c.balanceUsd,
+    })),
+    topOpportunities,
+    disclaimer: YIELD_DISCLAIMER,
+    fetchedAt: new Date().toISOString(),
+  };
+}
+
+// Solana side: same shape, scoped to a single Solana address. Solana tx
+// fees are negligible (~$0.00025 typical) relative to EVM gas, so no
+// per-pool gas estimate is computed here -- noted directly instead.
+export async function getYieldOpportunitiesSolana(solAddressRaw) {
+  const address = String(solAddressRaw || "").trim();
+  if (!isValidSolAddress(address)) {
+    throw new Error("invalid Solana address -- expected a base58 address, 32-44 characters");
+  }
+  const balRes = await getSolBalance(address);
+  const balance = balRes.sol;
+
+  if (!balance || balance <= 0) {
+    return {
+      source: "yield-opportunities-solana",
+      address,
+      balance: 0,
+      balanceUsd: null,
+      topOpportunities: [],
+      note: "No SOL balance found for this address.",
+      disclaimer: YIELD_DISCLAIMER,
+      fetchedAt: new Date().toISOString(),
+    };
+  }
+
+  const prices = await getNativeTokenPricesUsd(["solana"]);
+  const priceUsd = prices["solana"] ?? null;
+  const balanceUsd = priceUsd != null ? balance * priceUsd : null;
+
+  if (balanceUsd !== null && balanceUsd < YIELD_DUST_THRESHOLD_USD) {
+    return {
+      source: "yield-opportunities-solana",
+      address,
+      balance,
+      balanceUsd,
+      topOpportunities: [],
+      note: `Balance found but below the $${YIELD_DUST_THRESHOLD_USD} dust threshold.`,
+      disclaimer: YIELD_DISCLAIMER,
+      fetchedAt: new Date().toISOString(),
+    };
+  }
+
+  let pools = [];
+  try {
+    const agg = await getYieldAggregation({ chain: "Solana", limit: 5 });
+    pools = agg.pools;
+  } catch {
+    pools = [];
+  }
+
+  const candidates = pools.map((pool) => {
+    const apy = pool.apy || 0;
+    const projected6moUsd = balanceUsd != null ? balanceUsd * (apy / 100) * 0.5 : null;
+    const projected12moUsd = balanceUsd != null ? balanceUsd * (apy / 100) : null;
+    return {
+      chain: "solana",
+      chainNativeSymbol: "SOL",
+      walletBalance: balance,
+      walletBalanceUsd: balanceUsd,
+      protocol: pool.project,
+      pool: pool.symbol,
+      apy,
+      tvlUsd: pool.tvlUsd,
+      projected6moEarningsUsd: projected6moUsd,
+      projected12moEarningsUsd: projected12moUsd,
+      projected12moEarningsNative:
+        priceUsd && projected12moUsd != null ? projected12moUsd / priceUsd : null,
+      projectedReturnNote: `~${apy.toFixed(2)}% APY at current live rate (not compounded, not guaranteed)`,
+      estGasCostToEnter: { note: "negligible -- typical Solana tx fee is ~$0.00025", usd: 0.00025 },
+      ilRisk: pool.ilRisk,
+      stablecoin: pool.stablecoin,
+    };
+  });
+  candidates.sort((a, b) => (b.projected12moEarningsUsd || 0) - (a.projected12moEarningsUsd || 0));
+  const topOpportunities = candidates.slice(0, 3).map((c, i) => ({ rank: i + 1, ...c }));
+
+  return {
+    source: "yield-opportunities-solana",
+    address,
+    balance,
+    balanceUsd,
+    topOpportunities,
+    disclaimer: YIELD_DISCLAIMER,
+    fetchedAt: new Date().toISOString(),
+  };
+}
+
+// Combined: runs both scans for one request and ranks the top 3 globally
+// across the wallet's entire EVM + Solana footprint. Priced as a bundle
+// ($0.30) rather than the sum of the two standalone routes ($0.25 each).
+export async function getYieldOpportunitiesCombined(addressRaw, solAddressRaw) {
+  const [evmResult, solResult] = await Promise.all([
+    getYieldOpportunities(addressRaw).catch((err) => ({ error: err.message, topOpportunities: [] })),
+    getYieldOpportunitiesSolana(solAddressRaw).catch((err) => ({ error: err.message, topOpportunities: [] })),
+  ]);
+
+  const allCandidates = [...(evmResult.topOpportunities || []), ...(solResult.topOpportunities || [])];
+  allCandidates.sort((a, b) => (b.projected12moEarningsUsd || 0) - (a.projected12moEarningsUsd || 0));
+  const topOpportunities = allCandidates.slice(0, 3).map((c, i) => ({ ...c, rank: i + 1 }));
+
+  return {
+    source: "yield-opportunities-combined",
+    evmAddress: evmResult.address ?? addressRaw,
+    solAddress: solResult.address ?? solAddressRaw,
+    evmChainsWithBalance: evmResult.chainsWithBalance || [],
+    evmError: evmResult.error,
+    solBalance: solResult.balance ?? 0,
+    solBalanceUsd: solResult.balanceUsd ?? null,
+    solError: solResult.error,
+    topOpportunities,
+    disclaimer: YIELD_DISCLAIMER,
+    fetchedAt: new Date().toISOString(),
+  };
+}

@@ -148,6 +148,23 @@ app.get("/health", (req, res) => res.json({ status: "ok" }));
 // container) so the manifest works even if the env var is never set.
 const PUBLIC_BASE_URL = process.env.PUBLIC_BASE_URL || "https://organiccryptoyyc.com:8443";
 
+// Shared marketplace-facing description, used by both /.well-known/x402
+// (buildX402Manifest) and /openapi.json (buildOpenApiSpec -- the one
+// x402scan actually reads per the comments on PUBLIC_BASE_URL below).
+// Kept as one function so the two copies can't drift out of sync again --
+// they were identical strings duplicated by hand until 2026-08-23, when the
+// multi-chain EVM expansion made that duplication a real staleness risk.
+function apiDescription(routeCount) {
+  return (
+    "Real-device, multi-region site verification with screenshot proof, live Pocket Network Shannon " +
+    "relay-demand/tokenomics/validator-security data, and on-chain RPC snapshots across 38 chains -- " +
+    "Ethereum, Solana, BSC, and peaq natively, plus 34 more EVM chains via Pocket Network's free public " +
+    "gateway (Arbitrum, Base, Optimism, Polygon, Avalanche, zkSync, Linea, Scroll, Gnosis, and more) -- " +
+    routeCount + " metered x402 routes, priced and settled per call in USDC. Migrating to Acurast " +
+    "decentralized cloud compute for censorship-resistant hosting -- stay tuned."
+  );
+}
+
 // Substitutes a route's Bazaar-declared example path-param values into its
 // Express path template (":name" segments) so /.well-known/x402 advertises
 // a real, literally-fetchable "resource" URL instead of the raw route
@@ -204,11 +221,7 @@ function buildX402Manifest() {
   return {
     x402Version: 2,
     name: "organiccryptoyyc.com — Multi-Region Verification & On-Chain Data API",
-    description:
-      "Real-device, multi-region site verification with screenshot proof, live Pocket Network Shannon " +
-      "relay-demand/tokenomics/validator-security data, and Solana/peaq/BSC on-chain snapshots -- " + resources.length + " metered " +
-      "x402 routes, priced and settled per call in USDC. Migrating to Acurast decentralized cloud compute for " +
-      "censorship-resistant hosting -- stay tuned.",
+    description: apiDescription(resources.length),
     resources,
     resourceCount: resources.length,
     // Coinbase's own Bazaar discovery mirrors this same catalog once each
@@ -368,11 +381,7 @@ function buildOpenApiSpec() {
     info: {
       title: "organiccryptoyyc.com — Multi-Region Verification & On-Chain Data API",
       version: "1.0.0",
-      description:
-        "Real-device, multi-region site verification with screenshot proof, live Pocket Network Shannon " +
-        "relay-demand/tokenomics/validator-security data, and Solana/peaq/BSC on-chain snapshots -- " + Object.keys(routes).length +  " metered " +
-        "x402 routes, priced and settled per call in USDC. Migrating to Acurast decentralized cloud compute for " +
-        "censorship-resistant hosting -- stay tuned.",
+      description: apiDescription(Object.keys(routes).length),
       "x-guidance":
         "Every route below is a plain GET request metered with x402 (HTTP 402). Call a route " +
         "unauthenticated first: you'll get a 402 with an `accepts` array listing price/network/payTo " +

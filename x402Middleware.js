@@ -1241,6 +1241,26 @@ export const routes = {
       },
     }),
   },
+  "GET /v1/sec/fundamentals/:ticker": {
+    accepts: multiNetworkAccepts(0.02),
+    description:
+      "SEC EDGAR company fundamentals -- latest 10-K/10-Q filing metadata plus key XBRL financials (revenue, net income, assets, liabilities, equity, EPS, cash) for a US-listed ticker.",
+    extensions: declareDiscoveryExtension({
+      pathParams: { ticker: "AAPL" },
+      pathParamsSchema: {
+        properties: {
+          ticker: { type: "string", description: "US-listed stock ticker symbol, e.g. AAPL, MSFT, TSLA" },
+        },
+        required: ["ticker"],
+      },
+      queryParams: {
+        properties: {},
+      },
+      output: {
+        example: { source: "sec-edgar", ticker: "AAPL", cik: "0000320193" },
+      },
+    }),
+  },
 };
 
 export function buildX402Middleware() {

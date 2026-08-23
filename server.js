@@ -54,6 +54,7 @@ import {
   getCurrencyConversion,
   getPuppeteerPdf,
   getImageOcr,
+  getSecEdgarFundamentals,
 } from "./dataSources.js";
 
 const app = express();
@@ -884,6 +885,24 @@ app.get("/v1/image/ocr", async (req, res, next) => {
     const { url } = req.query;
     if (!url) return res.status(400).json({ error: "url query param is required" });
     res.json(await cached(`image:ocr:${url}`, 60, () => getImageOcr(url)));
+  } catch (err) {
+    next(err);
+  }
+});
+
+
+// SEC EDGAR company fundamentals (2026-08-23). $0.02/call. 6h cache -- SEC
+// filing data only changes a few times a year per company (quarterly 10-Qs,
+// annual 10-K), so caching this long trades effectively zero freshness for a
+// large cut in load against the SEC shared, rate-limited (10 req/s) API.
+app.get("/v1/sec/fundamentals/:ticker", async (req, res, next) => {
+  try {
+    const { ticker } = req.params;
+    res.json(
+      await cached(`sec:fundamentals:${String(ticker).toUpperCase()}`, 21600, () =>
+        getSecEdgarFundamentals(ticker)
+      )
+    );
   } catch (err) {
     next(err);
   }

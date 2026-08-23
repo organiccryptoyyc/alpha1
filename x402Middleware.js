@@ -1445,7 +1445,130 @@ export const routes = {
       },
     }),
   },
+  "GET /v1/chain-snapshot/:chain": {
+    accepts: multiNetworkAccepts(0.012),
+    description:
+      "Bundle: gas price + latest block number (+ native balance if you pass ?address=) for any of the 38 chains this API supports -- eth, sol, peaq, bsc, plus the 34-chain POKT gateway map -- in one call instead of two or three separate ones.",
+    extensions: declareDiscoveryExtension({
+      pathParams: { chain: "base" },
+      pathParamsSchema: {
+        properties: {
+          chain: {
+            type: "string",
+            description: "'eth', 'sol', 'peaq', 'bsc', or any of the 34 POKT gateway slugs (e.g. base, arb-one, avax, op, poly)",
+          },
+        },
+        required: ["chain"],
+      },
+      queryParams: {
+        properties: {
+          address: { type: "string", description: "Optional wallet address on the given chain -- adds native balance to the response" },
+        },
+      },
+      output: {
+        example: {
+          source: "chain-snapshot",
+          chain: "base",
+          chainName: "Base",
+          gasPrice: { chain: "base", chainName: "Base", wei: "12345678", gwei: 0.012345678 },
+          latestBlock: { chain: "base", chainName: "Base", blockNumber: 20123456 },
+        },
+      },
+    }),
+  },
+  "GET /v1/wallet-risk/:chain/:address": {
+    accepts: multiNetworkAccepts(0.045),
+    description:
+      "Bundle: wallet balance + wallet-smart-money activity score + OFAC sanctions screening for an eth or sol address, one call and one verdict instead of three separate calls to merge yourself.",
+    extensions: declareDiscoveryExtension({
+      pathParams: { chain: "eth", address: "0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045" },
+      pathParamsSchema: {
+        properties: {
+          chain: { type: "string", description: "'eth'/'ethereum' or 'sol'/'solana'" },
+          address: { type: "string", description: "wallet address on the given chain" },
+        },
+        required: ["chain", "address"],
+      },
+      queryParams: { properties: {} },
+      output: {
+        example: {
+          source: "wallet-risk",
+          chain: "ethereum",
+          verdict: "low risk, high value -- active, meaningful balance",
+        },
+      },
+    }),
+  },
+  "GET /v1/domain-trust/:domain": {
+    accepts: multiNetworkAccepts(0.32),
+    description:
+      "Bundle: brand-verify's uptime/performance/IP-intel trust score plus x402-seller-trust's Bazaar-listing/manifest/resource-probing reputation for the same domain, combined into one score and verdict. Priced as a bundle ($0.32) rather than the sum of the two standalone routes ($0.23 each). Works for any domain, not just active x402 sellers.",
+    extensions: declareDiscoveryExtension({
+      pathParams: { domain: "example.com" },
+      pathParamsSchema: {
+        properties: {
+          domain: { type: "string", description: "Bare domain to check, e.g. 'example.com' (no scheme)" },
+        },
+        required: ["domain"],
+      },
+      queryParams: { properties: {} },
+      output: {
+        example: {
+          source: "domain-trust-composite",
+          domain: "example.com",
+          combinedScore: 90,
+          verdict: "high-trust domain",
+        },
+      },
+    }),
+  },
+  "GET /v1/defi/precheck": {
+    accepts: multiNetworkAccepts(0.028),
+    description:
+      "Bundle: stablecoin depeg status + top DeFi yield pools + protocol/chain health score for one protocol or chain, rolled into a quick 'anything obviously wrong before I deploy capital here' verdict. Priced as a bundle ($0.028) rather than the sum of the three standalone routes ($0.04 combined).",
+    extensions: declareDiscoveryExtension({
+      input: { protocol: "lido", symbols: "usdt,usdc,dai" },
+      inputSchema: {
+        properties: {
+          protocol: { type: "string", description: "Protocol name or slug, e.g. 'lido', 'aave' (single-protocol mode)" },
+          chain: { type: "string", description: "Chain name, e.g. 'Ethereum' (chain-aggregate mode + yields filter; ignored for health scoring if protocol is set)" },
+          symbols: { type: "string", description: "Comma-separated stablecoin symbols for the depeg check (default: all supported)" },
+          thresholdPct: { type: "number", description: "Depeg deviation threshold percent (default 0.5)" },
+          minTvlUsd: { type: "string", description: "Minimum pool TVL in USD for the yields list (default 100000)" },
+          limit: { type: "string", description: "Max yield pools to return (default 20)" },
+        },
+      },
+      output: {
+        example: {
+          source: "defi-precheck-composite",
+          verdict: "no red flags -- looks safe to proceed",
+          flags: [],
+        },
+      },
+    }),
+  },
+  "GET /v1/pokt/pulse": {
+    accepts: multiNetworkAccepts(0.095),
+    description:
+      "Bundle: Pocket Network (Shannon) service-demand + supplier landscape + tokenomics + throughput leaderboard in one call instead of four. Priced as a bundle ($0.095) rather than the sum of the four standalone routes ($0.10 combined).",
+    extensions: declareDiscoveryExtension({
+      input: { limit: "10" },
+      inputSchema: {
+        properties: {
+          limit: { type: "string", description: "Number of top entries to return per section, 1-50 (default 10)" },
+        },
+      },
+      output: {
+        example: {
+          source: "pokt-network-pulse",
+          serviceDemand: { network: "pocket-shannon", rankedBy: "relayVolumeEma" },
+          supplierLandscape: { network: "pocket-shannon", activeSuppliers: 4083 },
+        },
+      },
+    }),
+  },
 };
+
 
 export function buildX402Middleware() {
   return paymentMiddleware(routes, server);

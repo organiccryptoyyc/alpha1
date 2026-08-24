@@ -72,6 +72,61 @@ if (!process.env.CDP_API_KEY_ID || !process.env.CDP_API_KEY_SECRET) {
 }
 const facilitatorClient = new HTTPFacilitatorClient(facilitator);
 
+// --- CDP v1-compat facilitator adapter (2026-08-24) ---
+// CDP's live facilitator backend rejects x402 protocol v2-shaped
+// paymentPayload/paymentRequirements (confirmed via direct /verify calls
+// against api.cdp.coinbase.com) but accepts the v1-flat shape with CAIP-2
+// network strings. @x402/svm's server-side registerExactSvmScheme only
+// builds v2 payloads and has no v1 server variant, so this wrapper
+// translates outgoing verify/settle calls at the boundary instead --
+// buyers and our own route declarations stay on v2 throughout; only the
+// wire call to CDP gets rewritten.
+function toX402V1CompatShape(paymentPayload, paymentRequirements) {
+  if (!paymentPayload || paymentPayload.x402Version !== 2 || !paymentPayload.accepted) {
+    return { v1Payload: paymentPayload, v1Requirements: paymentRequirements };
+  }
+  const req = paymentRequirements || paymentPayload.accepted;
+  const resource = paymentPayload.resource || {};
+  const v1Requirements = {
+    scheme: req.scheme,
+    network: req.network,
+    maxAmountRequired: req.amount,
+    resource: resource.url || "",
+    description: resource.description || "",
+    mimeType: resource.mimeType || "application/json",
+    payTo: req.payTo,
+    maxTimeoutSeconds: req.maxTimeoutSeconds,
+    asset: req.asset,
+    extra: req.extra,
+  };
+  const v1Payload = {
+    x402Version: 1,
+    scheme: req.scheme,
+    network: req.network,
+    payload: paymentPayload.payload,
+  };
+  return { v1Payload, v1Requirements };
+}
+
+class CdpV1CompatFacilitatorClient {
+  constructor(inner) {
+    this.inner = inner;
+  }
+  async getSupported() {
+    return this.inner.getSupported();
+  }
+  async verify(paymentPayload, paymentRequirements) {
+    const { v1Payload, v1Requirements } = toX402V1CompatShape(paymentPayload, paymentRequirements);
+    return this.inner.verify(v1Payload, v1Requirements);
+  }
+  async settle(paymentPayload, paymentRequirements) {
+    const { v1Payload, v1Requirements } = toX402V1CompatShape(paymentPayload, paymentRequirements);
+    return this.inner.settle(v1Payload, v1Requirements);
+  }
+}
+
+const cdpV1CompatFacilitatorClient = new CdpV1CompatFacilitatorClient(facilitatorClient);
+
 // SECURITY (key custody, reviewed 2026-08-04): this app holds NO signing key
 // for the Solana/CDP path above -- CDP_API_KEY_ID/SECRET is a bearer API key
 // that authenticates calls to Coinbase's hosted facilitator, not a private
@@ -216,7 +271,7 @@ if (PEAQ_PAY_TO_ADDRESS_SET) additionalFacilitators.push(new HTTPFacilitatorClie
 if (BSC_ENABLED) additionalFacilitators.push(new HTTPFacilitatorClient(binanceFacilitatorConfig));
 
 const server = new x402ResourceServer(
-  additionalFacilitators.length > 0 ? [facilitatorClient, ...additionalFacilitators] : facilitatorClient
+  additionalFacilitators.length > 0 ? [cdpV1CompatFacilitatorClient, ...additionalFacilitators] : cdpV1CompatFacilitatorClient
 );
 registerExactSvmScheme(server, { rpcUrl: process.env.SOL_RPC_URL });
 const evmNetworks = [];

@@ -129,12 +129,46 @@ the underlying issue. Root cause is unconfirmed but is most likely a deeper
 incompatibility between this server's Solana sponsored-transaction `extra`
 fields (`feePayer`/`recentBlockhash`/`lastValidBlockHeight`) and what
 current x402 v2 client libraries can consume -- an ecosystem-level gap, not
-something fixable from this repo alone. Every other payment network on this
-catalog (Base, Polygon, Arbitrum, World via the CDP facilitator) is
-unaffected; this is specific to the Solana leg. Treating this as a known,
+something fixable from this repo alone. Base now also goes through the CDP facilitator (added 2026-08-24, see
+"Base mainnet payment option" below) and is unaffected -- this is specific
+to the Solana leg. Polygon/Arbitrum/World are NOT yet wired in as payment
+networks despite an earlier scoping pass (2026-08-04) -- that work covered
+data-read routes across many chains, not payment acceptance; only Solana
+and Base currently accept payment via CDP. Treating this as a known,
 open item rather than continuing to debug it client-side -- see git history
 around 2026-08-23/24 for the full investigation if it needs revisiting.
 
+
+## Base mainnet payment option (2026-08-24)
+
+Added Base (chain ID 8453, CAIP-2 `eip155:8453`) as a second payment
+network alongside Solana on every route, routed through the same CDP
+facilitator. Reuses `PEAQ_PAY_TO_ADDRESS` as the default Base payout wallet
+(EVM addresses are chain-agnostic, so no new secret was needed to activate
+this) -- set `PAY_TO_ADDRESS_BASE` explicitly in Portainer if a dedicated
+Base wallet is preferred later.
+
+This was built as a direct fallback after finding CDP's `/verify` endpoint
+returns self-contradicting schema errors specifically for the Solana
+`exact` scheme (see the "Known issue" section above and
+`CDP-support-bug-report-solana-x402-verify.md`, filed with CDP support
+2026-08-24) -- the identical request shape validates cleanly for EVM/Base,
+confirmed via direct `/verify` testing before writing any server code.
+
+Also fixed `toX402V1CompatShape()` in `x402Middleware.js` to translate
+CAIP-2 network ids to CDP's plain wire aliases (`base`, `base-sepolia`,
+`solana`, `solana-devnet`) only at the outbound CDP request boundary --
+confirmed empirically that CDP's schema validation wants plain aliases, not
+CAIP-2, at that specific point. This doesn't fix the Solana issue (still
+open with CDP support) but makes its failure mode more informative, and is
+what makes Base's request shape validate correctly.
+
+**Status as of merge:** code is live on `main` (PR #18) and Portainer has
+been redeployed. NOT yet confirmed with a real on-chain settled Base
+payment -- next person to touch this should run a live payment test against
+any route with a Base-capable wallet (any EVM wallet holding a small amount
+of USDC on Base) before relying on this in production. Backup branch:
+`backup/verified-working-2026-08-24-base-evm`.
 
 ## 1. Get a Solana wallet
 

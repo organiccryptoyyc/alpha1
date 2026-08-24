@@ -55,6 +55,22 @@ if (!PEAQ_PAY_TO_ADDRESS) {
   );
 }
 
+// Base mainnet (EVM, chain ID 8453) payout address. Defaults to the
+// existing PEAQ_PAY_TO_ADDRESS when a dedicated PAY_TO_ADDRESS_BASE isn't
+// set -- EVM addresses are chain-agnostic (the same private key controls
+// funds on Base as on peaq), so this activates immediately without a new
+// Portainer secret. Set PAY_TO_ADDRESS_BASE explicitly if a dedicated Base
+// wallet is preferred later.
+const PAY_TO_ADDRESS_BASE = process.env.PAY_TO_ADDRESS_BASE || PEAQ_PAY_TO_ADDRESS;
+if (!PAY_TO_ADDRESS_BASE) {
+  console.warn(
+    "[x402] NOTE: Neither PAY_TO_ADDRESS_BASE nor PEAQ_PAY_TO_ADDRESS is " +
+      "set. Base will not be offered as a payment option until one of " +
+      "those is configured."
+  );
+}
+const BASE_PAY_TO_ADDRESS_SET = Boolean(PAY_TO_ADDRESS_BASE);
+
 // `facilitator` (from @coinbase/x402) is pre-wired to CDP's production
 // endpoint (https://api.cdp.coinbase.com/platform/v2/x402) and reads
 // CDP_API_KEY_ID / CDP_API_KEY_SECRET from the environment automatically for
@@ -81,6 +97,24 @@ const facilitatorClient = new HTTPFacilitatorClient(facilitator);
 // translates outgoing verify/settle calls at the boundary instead --
 // buyers and our own route declarations stay on v2 throughout; only the
 // wire call to CDP gets rewritten.
+// CDP's live facilitator's wire-level schema validation for its /verify
+// endpoint accepts ONLY plain network aliases (base, base-sepolia, solana,
+// solana-devnet), not the CAIP-2 ids used internally throughout the rest of
+// this file and the wider x402 v2 spec -- confirmed empirically via direct
+// /verify calls against api.cdp.coinbase.com (2026-08-23/24 investigation,
+// see PATCH-NOTES.md): sending CAIP-2 network values gets rejected with
+// self-contradicting "must be one of [...]" schema errors for Solana, but
+// the identical docs-exact shape validates cleanly for Base when the plain
+// alias is used. This map translates ONLY at the CDP wire boundary --
+// internal accept objects / getSupported() matching stay CAIP-2 throughout,
+// since that's what the SDK's own bookkeeping requires.
+const CDP_WIRE_NETWORK_ALIAS = {
+  "eip155:8453": "base",
+  "eip155:84532": "base-sepolia",
+  "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp": "solana",
+  "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1": "solana-devnet",
+};
+
 function toX402V1CompatShape(paymentPayload, paymentRequirements) {
   const req = paymentRequirements || (paymentPayload && paymentPayload.accepted);
   if (!paymentPayload || paymentPayload.x402Version !== 2 || !req) {
@@ -89,7 +123,7 @@ function toX402V1CompatShape(paymentPayload, paymentRequirements) {
   const resource = paymentPayload.resource || {};
   const v1Requirements = {
     scheme: req.scheme,
-    network: req.network,
+    network: CDP_WIRE_NETWORK_ALIAS[req.network] || req.network,
     maxAmountRequired: req.amount,
     resource: resource.url || "",
     description: resource.description || "",
@@ -102,7 +136,7 @@ function toX402V1CompatShape(paymentPayload, paymentRequirements) {
   const v1Payload = {
     x402Version: 1,
     scheme: req.scheme,
-    network: req.network,
+    network: CDP_WIRE_NETWORK_ALIAS[req.network] || req.network,
     payload: paymentPayload.payload,
   };
   return { v1Payload, v1Requirements };
@@ -276,6 +310,7 @@ const server = new x402ResourceServer(
 registerExactSvmScheme(server, { rpcUrl: process.env.SOL_RPC_URL });
 const evmNetworks = [];
 if (PEAQ_PAY_TO_ADDRESS_SET) evmNetworks.push("eip155:3338");
+if (BASE_PAY_TO_ADDRESS_SET) evmNetworks.push("eip155:8453");
 if (BSC_ENABLED) evmNetworks.push("eip155:56");
 if (evmNetworks.length > 0) {
   registerExactEvmScheme(server, { networks: evmNetworks });
@@ -293,6 +328,18 @@ const SOLANA_MAINNET = "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp";
 // CAIP-2 id for peaq mainnet — chain ID 3338, confirmed via peaq's own docs
 // (docs.peaq.xyz) and cross-checked against OnFinality/ChainList/PublicNode.
 const PEAQ_MAINNET = "eip155:3338";
+
+// CAIP-2 id for Base mainnet -- chain ID 8453. Native (Circle-issued) USDC
+// is already in @x402/evm's own DEFAULT_ASSETS table for this network
+// (asset 0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913, name "USD Coin",
+// version "2", 6 decimals) -- confirmed by reading the installed
+// @x402/evm@2.23.0 package source directly, the same asset/domain pairing
+// Coinbase's own facilitator is built to expect. Unlike peaq/BSC (custom
+// EVM chains needing a manually-specified asset+extra override, which is
+// exactly what caused peaq's real name-mismatch incident), Base doesn't
+// need one -- the "$X.XX" price shorthand below resolves against that
+// built-in table automatically, same as Solana already does.
+const BASE_MAINNET = "eip155:8453";
 
 // peaq's officially-announced bridged USDC (confirmed via peaq.xyz's own
 // "USDC is now on peaq" blog post, cross-checked on Subscan: symbol USDC,
@@ -360,6 +407,14 @@ function multiNetworkAccepts(usdAmount) {
   const accepts = [
     { scheme: "exact", payTo: PAY_TO_ADDRESS, price: `$${usdAmount.toFixed(3)}`, network: SOLANA_MAINNET },
   ];
+  if (BASE_PAY_TO_ADDRESS_SET) {
+    accepts.push({
+      scheme: "exact",
+      payTo: PAY_TO_ADDRESS_BASE,
+      price: `$${usdAmount.toFixed(3)}`,
+      network: BASE_MAINNET,
+    });
+  }
   if (PEAQ_PAY_TO_ADDRESS) {
     accepts.push({
       scheme: "exact",

@@ -82,10 +82,10 @@ const facilitatorClient = new HTTPFacilitatorClient(facilitator);
 // buyers and our own route declarations stay on v2 throughout; only the
 // wire call to CDP gets rewritten.
 function toX402V1CompatShape(paymentPayload, paymentRequirements) {
-  if (!paymentPayload || paymentPayload.x402Version !== 2 || !paymentPayload.accepted) {
+  const req = paymentRequirements || (paymentPayload && paymentPayload.accepted);
+  if (!paymentPayload || paymentPayload.x402Version !== 2 || !req) {
     return { v1Payload: paymentPayload, v1Requirements: paymentRequirements };
   }
-  const req = paymentRequirements || paymentPayload.accepted;
   const resource = paymentPayload.resource || {};
   const v1Requirements = {
     scheme: req.scheme,

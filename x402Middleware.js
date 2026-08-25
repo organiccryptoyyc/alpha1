@@ -198,12 +198,27 @@ class CdpV1CompatFacilitatorClient {
     return this.inner.getSupported();
   }
   async verify(paymentPayload, paymentRequirements) {
-    const { wirePayload, wireRequirements } = toCdpWireShape(paymentPayload, paymentRequirements);
-    return this.inner.verify(wirePayload, wireRequirements);
+    try {
+      const { wirePayload, wireRequirements } = toCdpWireShape(paymentPayload, paymentRequirements);
+      return await this.inner.verify(wirePayload, wireRequirements);
+    } catch (error) {
+      // DIAGNOSTIC (2026-08-24): a live through-server Solana payment test
+      // came back as an empty 402 {} body -- @x402/core's own error handling
+      // silently collapses a thrown facilitator error into an empty body
+      // (`response.body || {}`) with no log line of its own, so there was no
+      // way to see WHY without this. Logs only; does not change behavior.
+      console.error("[x402][CDP verify] threw:", error && error.stack ? error.stack : error);
+      throw error;
+    }
   }
   async settle(paymentPayload, paymentRequirements) {
-    const { wirePayload, wireRequirements } = toCdpWireShape(paymentPayload, paymentRequirements);
-    return this.inner.settle(wirePayload, wireRequirements);
+    try {
+      const { wirePayload, wireRequirements } = toCdpWireShape(paymentPayload, paymentRequirements);
+      return await this.inner.settle(wirePayload, wireRequirements);
+    } catch (error) {
+      console.error("[x402][CDP settle] threw:", error && error.stack ? error.stack : error);
+      throw error;
+    }
   }
 }
 

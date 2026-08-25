@@ -115,13 +115,61 @@ const CDP_WIRE_NETWORK_ALIAS = {
   "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1": "solana-devnet",
 };
 
-function toX402V1CompatShape(paymentPayload, paymentRequirements) {
+// UPDATE (2026-08-24, CDP support ticket response): CDP support confirmed
+// the theory above was half right. Their live /verify endpoint's schema
+// validation is a real, deterministic union between the x402 v1 and v2
+// shapes -- there is no contradiction once a request is fully, purely one
+// version or the other. The "self-contradicting" errors earlier in this
+// investigation came from mixing fields across versions (e.g. a v1
+// maxAmountRequired alongside a v2 amount, or a top-level
+// paymentPayload.network alongside paymentPayload.accepted), not from a bug
+// on CDP's side.
+//
+// For Solana's `exact` scheme specifically, CDP's guidance is the OPPOSITE
+// of what this file used to do: use v2 CONSISTENTLY (CAIP-2 network,
+// `amount` as a string, `paymentPayload.accepted` present with
+// network/scheme living there rather than on the payload root, and
+// `paymentRequirements` matching `accepted` exactly), not the v1-flat shape.
+// Confirmed by decoding the actual signed transaction CdpX402Client built
+// under this exact shape (client-v26/27/28-*.mjs, 2026-08-24): /verify
+// passes schema validation cleanly, and the resulting TransferChecked
+// instruction's amount, mint, destination associated-token-account, and fee
+// payer all match `accepted` byte-for-byte. The one remaining /verify
+// failure (invalid_exact_svm_payload_transaction_simulation_failed) was
+// independently confirmed via a direct Solana RPC read to be CDP's own
+// internal test signer having no USDC token account on-chain yet -- a
+// funding gap in CDP's test wallet, not a shape problem on our end.
+//
+// For EVM (Base etc.), the ORIGINAL v1-flat theory below was independently
+// confirmed correct by a clean control test that reached genuine
+// contract-execution-level validation with zero schema complaints
+// (client-v25-evm-base-synthetic.mjs) -- so that path is UNCHANGED here.
+// Net effect: Solana now gets the pure-v2 wire shape; EVM keeps the
+// v1-flat wire shape. Both are backed by an independently confirmed-correct
+// shape, not a guess.
+function toCdpWireShape(paymentPayload, paymentRequirements) {
   const req = paymentRequirements || (paymentPayload && paymentPayload.accepted);
   if (!paymentPayload || paymentPayload.x402Version !== 2 || !req) {
-    return { v1Payload: paymentPayload, v1Requirements: paymentRequirements };
+    return { wirePayload: paymentPayload, wireRequirements: paymentRequirements };
   }
+
+  const isSolana = typeof req.network === "string" && req.network.startsWith("solana:");
+  if (isSolana) {
+    // Pure v2 throughout -- see the comment above for how this was
+    // confirmed. `accepted` carries network/scheme; the payload root does
+    // not. paymentRequirements is the exact same object as `accepted`.
+    const wireRequirements = req;
+    const wirePayload = {
+      x402Version: 2,
+      payload: paymentPayload.payload,
+      accepted: req,
+    };
+    return { wirePayload, wireRequirements };
+  }
+
+  // EVM (Base etc.): v1-flat shape, unchanged from the original fix.
   const resource = paymentPayload.resource || {};
-  const v1Requirements = {
+  const wireRequirements = {
     scheme: req.scheme,
     network: CDP_WIRE_NETWORK_ALIAS[req.network] || req.network,
     maxAmountRequired: req.amount,
@@ -133,13 +181,13 @@ function toX402V1CompatShape(paymentPayload, paymentRequirements) {
     asset: req.asset,
     extra: req.extra,
   };
-  const v1Payload = {
+  const wirePayload = {
     x402Version: 1,
     scheme: req.scheme,
     network: CDP_WIRE_NETWORK_ALIAS[req.network] || req.network,
     payload: paymentPayload.payload,
   };
-  return { v1Payload, v1Requirements };
+  return { wirePayload, wireRequirements };
 }
 
 class CdpV1CompatFacilitatorClient {
@@ -150,12 +198,12 @@ class CdpV1CompatFacilitatorClient {
     return this.inner.getSupported();
   }
   async verify(paymentPayload, paymentRequirements) {
-    const { v1Payload, v1Requirements } = toX402V1CompatShape(paymentPayload, paymentRequirements);
-    return this.inner.verify(v1Payload, v1Requirements);
+    const { wirePayload, wireRequirements } = toCdpWireShape(paymentPayload, paymentRequirements);
+    return this.inner.verify(wirePayload, wireRequirements);
   }
   async settle(paymentPayload, paymentRequirements) {
-    const { v1Payload, v1Requirements } = toX402V1CompatShape(paymentPayload, paymentRequirements);
-    return this.inner.settle(v1Payload, v1Requirements);
+    const { wirePayload, wireRequirements } = toCdpWireShape(paymentPayload, paymentRequirements);
+    return this.inner.settle(wirePayload, wireRequirements);
   }
 }
 

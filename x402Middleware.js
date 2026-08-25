@@ -380,6 +380,50 @@ if (evmNetworks.length > 0) {
 }
 server.registerExtension(bazaarResourceServerExtension);
 
+// DIAGNOSTIC (2026-08-25): a through-server Solana payment test still returns
+// an empty 402 {} even with CdpV1CompatFacilitatorClient's own verify()/
+// settle() diagnostic logging in place (PR #20, 2026-08-24) -- and that
+// logging never fires, meaning the facilitator is never even reached.
+// @x402/core's processHTTPRequest() has TWO earlier gates that can silently
+// reject a payload before ever calling verify(): findMatchingRequirements()
+// (deep-equal match between freshly-built requirements and the client's
+// echoed `accepted`) and validateExtensions() (bazaar/discovery extension
+// echo check). Both return a "payment-error" with no console output of
+// their own. Wrap both ResourceServer methods with logging so the next live
+// test tells us exactly which gate is rejecting, and why. Logs only --
+// always calls through to the original implementation and returns its
+// result unchanged; does not alter behavior.
+const __diagFindMatchingRequirements = server.findMatchingRequirements.bind(server);
+server.findMatchingRequirements = function (availableRequirements, paymentPayload) {
+  const result = __diagFindMatchingRequirements(availableRequirements, paymentPayload);
+  if (!result) {
+    console.error(
+      "[x402][diag] findMatchingRequirements: NO MATCH. availableRequirements=",
+      JSON.stringify(availableRequirements),
+      "paymentPayload.accepted=",
+      JSON.stringify(paymentPayload && paymentPayload.accepted),
+      "paymentPayload.x402Version=",
+      paymentPayload && paymentPayload.x402Version
+    );
+  }
+  return result;
+};
+const __diagValidateExtensions = server.validateExtensions.bind(server);
+server.validateExtensions = function (paymentRequired, paymentPayload) {
+  const result = __diagValidateExtensions(paymentRequired, paymentPayload);
+  if (!result.valid) {
+    console.error(
+      "[x402][diag] validateExtensions: REJECTED.",
+      JSON.stringify(result),
+      "serverExtensions=",
+      JSON.stringify(paymentRequired && paymentRequired.extensions),
+      "clientExtensions=",
+      JSON.stringify(paymentPayload && paymentPayload.extensions)
+    );
+  }
+  return result;
+};
+
 // CAIP-2 id CDP's facilitator actually advertises for Solana mainnet — a
 // truncated genesis hash, not the human-readable "solana:mainnet" alias
 // used in some SDK docs/migration tables. Using the wrong string here makes

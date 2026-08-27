@@ -1232,6 +1232,319 @@ app.get("/internal/paysh/v1/x402/seller-trust/:encodedUrl", async (req, res, nex
     next(err);
   }
 });
+// PATCH (2026-08-25): expanded pay.sh internal proxy set. The original 10
+// routes above only covered what existed when the pay.sh integration was
+// first built (2026-08-19) -- everything shipped since (yield aggregation,
+// composite bundles, SEC EDGAR, wallet scoring, prospect enrichment,
+// utilities) had no pay.sh-side equivalent at all. Adding all of it now
+// EXCEPT the commodity RPC lane (gas price / latest block / wallet balance,
+// across eth/sol/peaq/bsc, the 34-chain generalized versions, price/:symbol,
+// and chain-snapshot) -- pay.sh's own catalog already lists Quicknode with
+// 137 endpoints covering that exact lane far more comprehensively, so
+// listing Alpha7's versions there would just be a worse copy of an
+// existing entry, not a differentiated offering. Same pattern as the
+// original 10: no x402 gating (not in x402Middleware.js's routes map),
+// gated only by requirePayshKey above, same cached() calls/keys/TTLs as
+// the matching public /v1/* route so a pay.sh-routed call and a direct call
+// share cache entries instead of doubling upstream load.
+
+app.get("/internal/paysh/v1/geo/ip/:ip", async (req, res, next) => {
+  try {
+    const { ip } = req.params;
+    const isV4 = IPV4_RE.test(ip) && ip.split(".").every((oct) => Number(oct) <= 255);
+    const isV6 = ip.includes(":") && IPV6_RE.test(ip);
+    if (!isV4 && !isV6) return res.status(400).json({ error: "ip must be a valid IPv4 or IPv6 address" });
+    res.json(await cached(`geo:ip:${ip}`, 3600, () => getIpGeolocation(ip)));
+  } catch (err) {
+    next(err);
+  }
+});
+
+app.get("/internal/paysh/v1/uprock/fetch", async (req, res, next) => {
+  try {
+    const { url } = req.query;
+    if (!url) return res.status(400).json({ error: "url query param is required" });
+    res.json(await cached(`uprock:${url}`, 180, () => getUprockFetch(url)));
+  } catch (err) {
+    next(err);
+  }
+});
+
+app.get("/internal/paysh/v1/uprock/verify/:domain", async (req, res, next) => {
+  try {
+    const { domain } = req.params;
+    const regions =
+      typeof req.query.regions === "string"
+        ? req.query.regions.split(",").map((r) => r.trim().toUpperCase()).filter(Boolean)
+        : undefined;
+    const cacheKey = `uprock:verify:${domain}:${regions ? regions.join(",") : "default"}`;
+    res.json(await cached(cacheKey, 300, () => getUprockVerify(domain, { regions })));
+  } catch (err) {
+    next(err);
+  }
+});
+
+app.get("/internal/paysh/v1/pokt/supplier-trust/:operatorId", async (req, res, next) => {
+  try {
+    const { operatorId } = req.params;
+    res.json(await cached(`pokt:supplier-trust:${operatorId}`, 300, () => getPoktSupplierTrust(operatorId)));
+  } catch (err) {
+    next(err);
+  }
+});
+
+app.get("/internal/paysh/v1/render/screenshot", async (req, res, next) => {
+  try {
+    const { url } = req.query;
+    if (!url) return res.status(400).json({ error: "url query param is required" });
+    res.json(await cached(`render:screenshot:${url}`, 30, () => getPuppeteerScreenshot(url)));
+  } catch (err) {
+    next(err);
+  }
+});
+
+app.get("/internal/paysh/v1/convert/heic-to-png", async (req, res, next) => {
+  try {
+    const { url } = req.query;
+    if (!url) return res.status(400).json({ error: "url query param is required" });
+    res.json(await cached(`convert:heic-to-png:${url}`, 60, () => getHeicToPng(url)));
+  } catch (err) {
+    next(err);
+  }
+});
+
+app.get("/internal/paysh/v1/search/web", async (req, res, next) => {
+  try {
+    const { q, limit } = req.query;
+    if (!q) return res.status(400).json({ error: "q query param is required" });
+    res.json(await cached(`search:web:${q}:${limit || ""}`, 30, () => getWebSearch(q, { limit })));
+  } catch (err) {
+    next(err);
+  }
+});
+
+app.get("/internal/paysh/v1/agent/reputation/:agentId", async (req, res, next) => {
+  try {
+    const { agentId } = req.params;
+    const chain = typeof req.query.chain === "string" ? req.query.chain : undefined;
+    const cacheKey = `agent:reputation:${chain || "eth"}:${agentId}`;
+    res.json(await cached(cacheKey, 120, () => getAgentReputation(agentId, { chain })));
+  } catch (err) {
+    next(err);
+  }
+});
+
+app.get("/internal/paysh/v1/eth/logs", async (req, res, next) => {
+  try {
+    const { address, topic0, blocks, decimals, tokenUsdPrice, minUsd } = req.query;
+    if (!address) return res.status(400).json({ error: "address query param is required" });
+    const cacheKey = `eth:logs:${address}:${topic0 || ""}:${blocks || ""}:${decimals || ""}:${tokenUsdPrice || ""}:${minUsd || ""}`;
+    res.json(await cached(cacheKey, 15, () => getEthLogs(address, { topic0, blocks, decimals, tokenUsdPrice, minUsd })));
+  } catch (err) {
+    next(err);
+  }
+});
+
+app.get("/internal/paysh/v1/sol/history/:address", async (req, res, next) => {
+  try {
+    const { address } = req.params;
+    const { limit } = req.query;
+    const cacheKey = `sol:history:${address}:${limit || ""}`;
+    res.json(await cached(cacheKey, 20, () => getSolTransactionHistory(address, { limit })));
+  } catch (err) {
+    next(err);
+  }
+});
+
+app.get("/internal/paysh/v1/currency/convert", async (req, res, next) => {
+  try {
+    const { from, to, amount } = req.query;
+    if (!from || !to) return res.status(400).json({ error: "from and to query params are required" });
+    const cacheKey = `currency:convert:${String(from).toUpperCase()}:${String(to).toUpperCase()}:${amount || 1}`;
+    res.json(await cached(cacheKey, 3600, () => getCurrencyConversion(from, to, amount)));
+  } catch (err) {
+    next(err);
+  }
+});
+
+app.get("/internal/paysh/v1/render/pdf", async (req, res, next) => {
+  try {
+    const { url, format, landscape } = req.query;
+    if (!url) return res.status(400).json({ error: "url query param is required" });
+    const cacheKey = `render:pdf:${url}:${format || "Letter"}:${landscape ? "landscape" : "portrait"}`;
+    res.json(await cached(cacheKey, 30, () => getPuppeteerPdf(url, { format, landscape: landscape === "true" })));
+  } catch (err) {
+    next(err);
+  }
+});
+
+app.get("/internal/paysh/v1/image/ocr", async (req, res, next) => {
+  try {
+    const { url } = req.query;
+    if (!url) return res.status(400).json({ error: "url query param is required" });
+    res.json(await cached(`image:ocr:${url}`, 60, () => getImageOcr(url)));
+  } catch (err) {
+    next(err);
+  }
+});
+
+app.get("/internal/paysh/v1/stablecoin/depeg-check", async (req, res, next) => {
+  try {
+    const { symbols, thresholdPct } = req.query;
+    const cacheKey = `stablecoin:depeg:${symbols || "all"}:${thresholdPct || ""}`;
+    res.json(await cached(cacheKey, 60, () => getStablecoinDepeg({ symbols, thresholdPct })));
+  } catch (err) {
+    next(err);
+  }
+});
+
+app.get("/internal/paysh/v1/defi/yields", async (req, res, next) => {
+  try {
+    const { chain, project, symbol, stablecoinOnly, minTvlUsd, sortBy, limit, includeOutliers } = req.query;
+    const cacheKey = `defi:yields:${chain || ""}:${project || ""}:${symbol || ""}:${stablecoinOnly || ""}:${minTvlUsd || ""}:${sortBy || ""}:${limit || ""}:${includeOutliers || ""}`;
+    res.json(await cached(cacheKey, 600, () => getYieldAggregation({ chain, project, symbol, stablecoinOnly, minTvlUsd, sortBy, limit, includeOutliers })));
+  } catch (err) {
+    next(err);
+  }
+});
+
+app.get("/internal/paysh/v1/protocol/health", async (req, res, next) => {
+  try {
+    const { protocol, chain } = req.query;
+    if (!protocol && !chain) return res.status(400).json({ error: "protocol or chain query param is required" });
+    const cacheKey = `protocol:health:${protocol || ""}:${chain || ""}`;
+    res.json(await cached(cacheKey, 600, () => getProtocolHealth({ protocol, chain })));
+  } catch (err) {
+    next(err);
+  }
+});
+
+app.get("/internal/paysh/v1/nft/analytics", async (req, res, next) => {
+  try {
+    const { collection, contractAddress, chain } = req.query;
+    if (!collection && !(contractAddress && chain)) {
+      return res.status(400).json({ error: "collection or contractAddress+chain query param is required" });
+    }
+    const cacheKey = `nft:analytics:${collection || ""}:${contractAddress || ""}:${chain || ""}`;
+    res.json(await cached(cacheKey, 300, () => getNftCollectionAnalytics({ collection, contractAddress, chain })));
+  } catch (err) {
+    next(err);
+  }
+});
+
+app.get("/internal/paysh/v1/sec/fundamentals/:ticker", async (req, res, next) => {
+  try {
+    const { ticker } = req.params;
+    res.json(
+      await cached(`sec:fundamentals:${String(ticker).toUpperCase()}`, 21600, () =>
+        getSecEdgarFundamentals(ticker)
+      )
+    );
+  } catch (err) {
+    next(err);
+  }
+});
+
+app.get("/internal/paysh/v1/wallet/smart-money/:chain/:address", async (req, res, next) => {
+  try {
+    const { chain, address } = req.params;
+    res.json(
+      await cached(`wallet:smart-money:${chain}:${address}`, 300, () =>
+        getWalletSmartMoney(chain, address)
+      )
+    );
+  } catch (err) {
+    next(err);
+  }
+});
+
+app.get("/internal/paysh/v1/prospect/enrichment/:chain/:address", async (req, res, next) => {
+  try {
+    const { chain, address } = req.params;
+    const { domain } = req.query;
+    res.json(
+      await cached(
+        `prospect:enrichment:${chain}:${address}:${domain || ""}`,
+        120,
+        () => getProspectEnrichment(chain, address, domain)
+      )
+    );
+  } catch (err) {
+    next(err);
+  }
+});
+
+app.get("/internal/paysh/v1/yield/best-opportunities/:address", async (req, res, next) => {
+  try {
+    const { address } = req.params;
+    res.json(await cached(`yield:evm:${address}`, 60, () => getYieldOpportunities(address)));
+  } catch (err) {
+    next(err);
+  }
+});
+
+app.get("/internal/paysh/v1/yield/best-opportunities/solana/:address", async (req, res, next) => {
+  try {
+    const { address } = req.params;
+    res.json(await cached(`yield:sol:${address}`, 60, () => getYieldOpportunitiesSolana(address)));
+  } catch (err) {
+    next(err);
+  }
+});
+
+app.get("/internal/paysh/v1/yield/best-opportunities/combined/:address/:solAddress", async (req, res, next) => {
+  try {
+    const { address, solAddress } = req.params;
+    res.json(
+      await cached(`yield:combined:${address}:${solAddress}`, 60, () =>
+        getYieldOpportunitiesCombined(address, solAddress)
+      )
+    );
+  } catch (err) {
+    next(err);
+  }
+});
+
+app.get("/internal/paysh/v1/wallet-risk/:chain/:address", async (req, res, next) => {
+  try {
+    const { chain, address } = req.params;
+    res.json(await cached(`wallet-risk:${chain}:${address}`, 120, () => getWalletRisk(chain, address)));
+  } catch (err) {
+    next(err);
+  }
+});
+
+app.get("/internal/paysh/v1/domain-trust/:domain", async (req, res, next) => {
+  try {
+    const { domain } = req.params;
+    res.json(await cached(`domain-trust:${domain}`, 300, () => getDomainTrust(domain)));
+  } catch (err) {
+    next(err);
+  }
+});
+
+app.get("/internal/paysh/v1/defi/precheck", async (req, res, next) => {
+  try {
+    const { protocol, chain, symbols, thresholdPct, minTvlUsd, limit } = req.query;
+    if (!protocol && !chain) return res.status(400).json({ error: "protocol or chain query param is required" });
+    const cacheKey = `defi:precheck:${protocol || ""}:${chain || ""}:${symbols || ""}:${thresholdPct || ""}:${minTvlUsd || ""}:${limit || ""}`;
+    res.json(
+      await cached(cacheKey, 300, () => getDefiPreCheck({ protocol, chain, symbols, thresholdPct, minTvlUsd, limit }))
+    );
+  } catch (err) {
+    next(err);
+  }
+});
+
+app.get("/internal/paysh/v1/pokt/pulse", async (req, res, next) => {
+  try {
+    const { limit } = req.query;
+    res.json(await cached(`pokt:pulse:${limit || 10}`, 60, () => getPoktPulse(limit)));
+  } catch (err) {
+    next(err);
+  }
+});
+
 
 // Centralized error handler — never leak stack traces to paying callers.
 app.use((err, req, res, _next) => {

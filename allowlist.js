@@ -46,6 +46,8 @@
 // to see what's for sale before deciding whether it's worth requesting
 // access.
 
+import { timingSafeEqual } from "node:crypto";
+
 const ALLOWLIST_MODE = (process.env.ALLOWLIST_MODE || "off").toLowerCase();
 const ALLOWLIST_KEYS = new Set(
   (process.env.ALLOWLIST_KEYS || "")
@@ -53,6 +55,29 @@ const ALLOWLIST_KEYS = new Set(
     .map((k) => k.trim())
     .filter(Boolean)
 );
+
+function constantTimeEqual(a, b) {
+  const bufA = Buffer.from(String(a ?? ""));
+  const bufB = Buffer.from(String(b ?? ""));
+  if (bufA.length !== bufB.length) return false;
+  return timingSafeEqual(bufA, bufB);
+}
+
+// Constant-time membership check (2026-08-27 hardening). Set.has() below was
+// a plain hash-table lookup, not the byte-by-byte early-exit comparison
+// timingSafeEqual protects against -- for a security-relevant allowlist key,
+// checking every configured key with a constant-time comparison (no
+// short-circuit on the first match) is the more defensible pattern, and
+// keeps this consistent with the same hardening applied to requirePayshKey's
+// secret check in server.js.
+function isAllowlistedKey(suppliedKey) {
+  if (!suppliedKey) return false;
+  let found = false;
+  for (const key of ALLOWLIST_KEYS) {
+    if (constantTimeEqual(suppliedKey, key)) found = true;
+  }
+  return found;
+}
 
 // NOTE: this was originally written as a flat if/else-if chain keyed only on
 // ALLOWLIST_MODE, with an `else if (ALLOWLIST_MODE !== "off")` catch-all
@@ -98,7 +123,7 @@ export function allowlistMiddleware() {
     }
 
     const suppliedKey = req.get("X-Alpha7-Key");
-    const allowed = Boolean(suppliedKey && ALLOWLIST_KEYS.has(suppliedKey));
+    const allowed = isAllowlistedKey(suppliedKey);
 
     if (ALLOWLIST_MODE === "log") {
       console.log(

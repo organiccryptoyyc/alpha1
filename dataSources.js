@@ -1090,9 +1090,20 @@ export async function getPoktThroughputLeaderboard(limit = 10) {
   // be a valid identifier, so service ids -- which can contain characters
   // like "-" -- are referenced by a safe positional alias "s0", "s1", ...
   // and mapped back to the real id from the services list above).
+  //
+  // SECURITY FIX (2026-08-27): s.id itself was previously interpolated
+  // straight into the query string inside a hand-written "..." literal --
+  // s.id comes from data.pocket.network/graphql's OWN prior response, not
+  // directly from the buyer, but it's still attacker-reachable one hop
+  // removed: anyone who stakes as a POKT service provider can register a
+  // service id containing a literal '"' or newline, which would break out
+  // of that string and inject arbitrary GraphQL into this batched query.
+  // JSON.stringify() produces a properly quoted/escaped GraphQL string
+  // literal (JSON and GraphQL string-escaping are compatible for this),
+  // closing that second-order injection path.
   const fields = services
     .map(
-      (s, i) => `s${i}: service(id: "${s.id}") {
+      (s, i) => `s${i}: service(id: ${JSON.stringify(s.id)}) {
         msgCreateClaims {
           aggregates { sum { numRelays numClaimedComputedUnits numEstimatedComputedUnits } }
         }
@@ -1258,7 +1269,9 @@ async function uprockCrawl(targetUrl, { timeoutSec = 20, maxWaitMs = 20000, poll
 // only at DNS time (DNS rebinding) would slip through this check, since it
 // only inspects the string the buyer supplied, not what it resolves to.
 // Closing that gap needs a resolve-then-recheck step (and ideally the same
-// check repeated by UpRock's own crawler); flagged here, not yet built.
+// check repeated by UpRock's own crawler) -- see safeFetch() below, added
+// 2026-08-27, which closes it for every route in this file that fetches the
+// target itself rather than handing it to another service.
 const BLOCKED_HOSTNAMES = new Set(["localhost", "0.0.0.0", "[::1]", "::1"]);
 const BLOCKED_HOSTNAME_PATTERNS = [
   /^127\./, // IPv4 loopback (127.0.0.0/8)
@@ -1273,6 +1286,68 @@ function isBlockedTarget(hostname) {
   const h = hostname.toLowerCase();
   if (BLOCKED_HOSTNAMES.has(h)) return true;
   return BLOCKED_HOSTNAME_PATTERNS.some((re) => re.test(h));
+}
+
+// SECURITY FIX (DNS-rebinding, 2026-08-27): isBlockedTarget() above only
+// checks the hostname STRING a caller supplied -- it says nothing about what
+// that hostname actually resolves to. A domain with a short TTL can pass the
+// string check above, then resolve to 169.254.169.254 (or any internal
+// address) by the time the real fetch happens, or answer differently on a
+// second lookup. safeFetch() closes that gap for every route in this file
+// that fetches the buyer/attacker-supplied URL itself, in this process
+// (probePoktSupplierEndpoint, fetchManifestAt, probeSellerResource,
+// getHeicToPng, getImageOcr, and the ERC-8004 registration-file fetch in
+// getAgentReputation): it resolves the hostname itself, checks EVERY
+// resolved address -- not just the hostname string -- against the same
+// blocklist above, and pins the actual TCP connection to the one address it
+// just checked, via a custom undici dispatcher, so a second DNS answer
+// arriving between the check and the connect (the rebind) can't substitute
+// an unchecked address underneath us.
+//
+// Routes that hand the URL off to a separate service instead of fetching it
+// themselves (getUprockFetch/getUprockVerify -> UpRock's own device network;
+// getPuppeteerScreenshot/getPuppeteerPdf -> the puppeteer-render container)
+// still use the plain isBlockedTarget() string check as a first-pass filter
+// before handoff, same as before -- the actual rebind risk for those lives
+// in the receiving service's own DNS resolution, which this file has no way
+// to control from here. That's a separate, real follow-up (UpRock's own
+// crawler for the former; puppeteer-render.js for the latter), not solved
+// by this fix.
+async function resolveVerifiedDispatcher(hostname) {
+  const { lookup: dnsLookup } = await import("node:dns/promises");
+  let addresses;
+  try {
+    addresses = await dnsLookup(hostname, { all: true, verbatim: true });
+  } catch {
+    throw new Error("could not resolve host");
+  }
+  if (!addresses.length) throw new Error("could not resolve host");
+  for (const { address } of addresses) {
+    if (isBlockedTarget(address)) {
+      throw new Error("target host resolves to a blocked address");
+    }
+  }
+  const { address: pinnedIp, family } = addresses[0];
+  const { Agent } = await import("undici");
+  return new Agent({
+    connect: {
+      lookup: (_hostname, _options, callback) => callback(null, pinnedIp, family),
+    },
+  });
+}
+
+// Drop-in replacement for fetch() for every buyer-URL-accepting function in
+// this file that makes the request itself (see the list in the comment
+// above). Callers still do their own URL/protocol validation before calling
+// this -- safeFetch() only owns the SSRF-specific checks (literal string
+// check, then resolve-and-pin), not general input validation.
+async function safeFetch(targetUrl, options = {}) {
+  const parsed = new URL(targetUrl);
+  if (isBlockedTarget(parsed.hostname)) {
+    throw new Error("target host is not allowed");
+  }
+  const dispatcher = await resolveVerifiedDispatcher(parsed.hostname);
+  return fetch(targetUrl, { ...options, dispatcher });
 }
 
 export async function getUprockFetch(targetUrl) {
@@ -1591,7 +1666,16 @@ export async function getBrandVerify(domain, { regions } = {}) {
     let dnsError = null;
     try {
           const result = await dnsLookup(trimmed);
-          resolvedIp = result.address;
+          // DNS-rebinding hardening (2026-08-27): isBlockedTarget(trimmed)
+          // above only checked the domain string. Check what it actually
+          // resolves to as well, so a blocked-range IP doesn't get handed to
+          // the third-party geolocation lookup below or echoed back to the
+          // caller in resolvedIp.
+          if (isBlockedTarget(result.address)) {
+            dnsError = "domain resolves to a blocked address";
+          } else {
+            resolvedIp = result.address;
+          }
     } catch (err) {
           dnsError = err.message;
     }
@@ -1688,7 +1772,7 @@ async function probePoktSupplierEndpoint(url) {
     const timeout = setTimeout(() => controller.abort(), SUPPLIER_TRUST_PROBE_TIMEOUT_MS);
     const start = Date.now();
     try {
-          const res = await fetch(parsed.toString(), { method: "GET", signal: controller.signal });
+          const res = await safeFetch(parsed.toString(), { method: "GET", signal: controller.signal });
           return { url, reachable: true, statusCode: res.status, responseTimeMs: Date.now() - start };
     } catch (err) {
           return { url, reachable: false, error: err.name === "AbortError" ? "timeout" : err.message };
@@ -1846,7 +1930,12 @@ async function fetchManifestAt(url) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), MANIFEST_FETCH_TIMEOUT_MS);
   try {
-    const res = await fetch(url, { signal: controller.signal });
+    // Was a bare fetch() with no target check of its own -- relied entirely
+    // on the caller (getX402SellerTrust) having already checked the base
+    // hostname. safeFetch() closes that gap directly (own isBlockedTarget
+    // check + DNS-rebind-safe pinned resolution), same as every other
+    // buyer-URL fetch in this file.
+    const res = await safeFetch(url, { signal: controller.signal });
     if (!res.ok) return null;
     return await res.json();
   } catch {
@@ -1900,7 +1989,7 @@ async function probeSellerResource(url) {
   const timeout = setTimeout(() => controller.abort(), SELLER_TRUST_PROBE_TIMEOUT_MS);
   const start = Date.now();
   try {
-    const res = await fetch(parsed.toString(), { method: "GET", signal: controller.signal });
+    const res = await safeFetch(parsed.toString(), { method: "GET", signal: controller.signal });
     const responseTimeMs = Date.now() - start;
     let hasAcceptsArray = false;
     if (res.status === 402) {
@@ -2063,7 +2152,16 @@ export async function getX402SellerTrust(baseUrl) {
   let dnsError = null;
   try {
     const result = await dnsLookup(hostname);
-    resolvedIp = result.address;
+    // DNS-rebinding hardening (2026-08-27): isBlockedTarget(parsed.hostname)
+    // above only checked the hostname string. Check what it actually
+    // resolves to as well, so a blocked-range IP doesn't get handed to the
+    // third-party geolocation lookup below or echoed back to the caller in
+    // resolvedIp.
+    if (isBlockedTarget(result.address)) {
+      dnsError = "domain resolves to a blocked address";
+    } else {
+      resolvedIp = result.address;
+    }
   } catch (err) {
     dnsError = err.message;
   }
@@ -2343,7 +2441,7 @@ export async function getHeicToPng(targetUrl) {
     throw new Error("url must not target a localhost, private, or link-local address");
   }
 
-  const res = await fetch(parsed.toString());
+  const res = await safeFetch(parsed.toString());
   if (!res.ok) {
     throw new Error(`failed to fetch source image: HTTP ${res.status}`);
   }
@@ -2407,7 +2505,7 @@ export async function getImageOcr(targetUrl) {
     throw new Error("url must not target a localhost, private, or link-local address");
   }
 
-  const imgRes = await fetch(parsed.toString());
+  const imgRes = await safeFetch(parsed.toString());
   if (!imgRes.ok) {
     throw new Error(`failed to fetch source image: HTTP ${imgRes.status}`);
   }
@@ -2673,7 +2771,7 @@ export async function getAgentReputation(agentIdRaw, { chain = "eth" } = {}) {
         const controller = new AbortController();
         const timeout = setTimeout(() => controller.abort(), 5000);
         try {
-          const res = await fetch(agentURI, { signal: controller.signal });
+          const res = await safeFetch(agentURI, { signal: controller.signal });
           if (res.ok) {
             const json = await res.json();
             registrationFile = {

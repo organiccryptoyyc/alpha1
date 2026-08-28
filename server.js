@@ -10,6 +10,7 @@
 import express from "express";
 import NodeCache from "node-cache";
 import rateLimit from "express-rate-limit";
+import { timingSafeEqual } from "node:crypto";
 import { buildX402Middleware, routes } from "./x402Middleware.js";
 // PATCH (2026-08-08): participant allowlist middleware -- see allowlist.js
 // for the full design (off by default, three modes: off/log/enforce).
@@ -1120,12 +1121,29 @@ app.get("/v1/pokt/pulse", async (req, res, next) => {
 // here (see provider.yml) -- the commodity RPC routes (gas price, latest
 // block, wallet balance) aren't, since Quicknode already covers that lane on
 // pay.sh far more comprehensively.
+// Constant-time string comparison (2026-08-27 hardening). A plain `!==`
+// short-circuits on the first mismatched byte, which is a textbook timing
+// side channel for a secret comparison -- impractical to actually exploit
+// over real network jitter, but a one-line fix and standard practice for
+// any shared-secret check, so worth doing rather than leaving as `!==`.
+// Lengths differing is checked (and returns false) before the constant-time
+// comparison runs, since timingSafeEqual() throws on mismatched buffer
+// lengths rather than comparing them -- that length check itself isn't
+// constant-time, but leaking length alone (not content) is the accepted
+// tradeoff here, same as every standard timingSafeEqual usage pattern.
+function constantTimeEqual(a, b) {
+  const bufA = Buffer.from(String(a ?? ""));
+  const bufB = Buffer.from(String(b ?? ""));
+  if (bufA.length !== bufB.length) return false;
+  return timingSafeEqual(bufA, bufB);
+}
+
 function requirePayshKey(req, res, next) {
   const expected = process.env.PAYSH_INTERNAL_KEY;
   if (!expected) {
     return res.status(503).json({ error: "PAYSH_INTERNAL_KEY is not configured" });
   }
-  if (req.headers["x-internal-key"] !== expected) {
+  if (!constantTimeEqual(req.headers["x-internal-key"], expected)) {
     return res.status(401).json({ error: "invalid or missing X-Internal-Key" });
   }
   next();

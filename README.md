@@ -73,6 +73,8 @@ open item on the roadmap that needs a person at a keyboard running `vercel`
 commands rather than another API build; everything else on the public
 `/v1/*` catalog and the Bazaar listing is unaffected by it being unfinished.
 
+**Open security item: Dockerfile still runs as root.** The 2026-08-27 security audit (`ALPHA7-SECURITY-AUDIT-2026-08-27.md`) flagged 4 findings. 3 shipped the same day (DNS-rebinding SSRF guard in `dataSources.js`, a second-order GraphQL injection fix, and constant-time secret comparisons in `server.js`/`allowlist.js` -- see `backup/verified-working-2026-08-27`). The 4th (Low severity) is still open: the container has no `USER` directive in the Dockerfile, so the app runs as root inside the container. Deferred intentionally -- needs to be picked up soon.
+
 **Where this document was updated:** this section is new as of 2026-08-23,
 added to give a single at-a-glance status point now that the per-round detail
 below has grown to 30+ dated sections. No application code changed with this

@@ -5,7 +5,7 @@ WORKDIR /app
 COPY package.json ./
 RUN npm install --omit=dev
 
-COPY server.js dataSources.js x402Middleware.js allowlist.js ./
+COPY server.js dataSources.js x402Middleware.js allowlist.js edgeStore.js edgeIngestRoute.js edgeDataSource.js ./
 
 ENV PORT=4021
 EXPOSE 4021

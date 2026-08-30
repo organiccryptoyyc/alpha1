@@ -1784,6 +1784,58 @@ export const routes = {
       },
     }),
   },
+  "GET /v1/edge/rpc-pulse/:chain": {
+    accepts: multiNetworkAccepts(0.015),
+    description:
+      "Latest RPC/gateway latency and success reading from an independently-hosted (non-cloud) vantage point.",
+    extensions: declareDiscoveryExtension({
+      pathParams: { chain: "eth" },
+      pathParamsSchema: {
+        properties: {
+          chain: { type: "string", description: "Chain id as configured on the collector, e.g. eth, sol, pokt" },
+        },
+        required: ["chain"],
+      },
+      queryParams: {
+        properties: {
+          provider: { type: "string", description: "Optional -- filter to one provider (e.g. llamarpc)" },
+        },
+      },
+      output: {
+        example: {
+          chain: "eth",
+          readings: [{ vantage: "yyc-home", provider: "llamarpc", latencyMs: 84, success: true }],
+        },
+      },
+    }),
+  },
+  "GET /v1/edge/rpc-performance/:chain": {
+    accepts: multiNetworkAccepts(0.045),
+    description:
+      "Ranked RPC/gateway performance over a trailing window, measured from an independent vantage point -- which endpoint to actually use right now, not just a single reading.",
+    extensions: declareDiscoveryExtension({
+      pathParams: { chain: "sol" },
+      pathParamsSchema: {
+        properties: {
+          chain: { type: "string", description: "Chain id as configured on the collector, e.g. eth, sol, pokt" },
+        },
+        required: ["chain"],
+      },
+      queryParams: {
+        properties: {
+          window: { type: "string", description: "1h, 6h, 24h, or 7d (default 24h)" },
+          provider: { type: "string", description: "Optional -- filter to one provider" },
+        },
+      },
+      output: {
+        example: {
+          chain: "sol",
+          window: "24h",
+          recommended: { vantage: "yyc-home", provider: "solana-mainnet" },
+        },
+      },
+    }),
+  },
 };
 
 

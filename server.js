@@ -15,6 +15,9 @@ import { buildX402Middleware, routes } from "./x402Middleware.js";
 // PATCH (2026-08-08): participant allowlist middleware -- see allowlist.js
 // for the full design (off by default, three modes: off/log/enforce).
 import { allowlistMiddleware } from "./allowlist.js";
+import { edgeStore } from "./edgeStore.js";
+import { registerEdgeIngestRoute } from "./edgeIngestRoute.js";
+import { getEdgeRpcPulse, getEdgeRpcPerformance } from "./edgeDataSource.js";
 import {
   getEthGasPrice,
   getEthLatestBlock,
@@ -1094,6 +1097,30 @@ app.get("/v1/pokt/pulse", async (req, res, next) => {
   }
 });
 
+app.get("/v1/edge/rpc-pulse/:chain", async (req, res, next) => {
+  try {
+    const { chain } = req.params;
+    const { provider, vantage } = req.query;
+    res.json(await getEdgeRpcPulse(chain, { provider, vantage }));
+  } catch (err) {
+    next(err);
+  }
+});
+
+app.get("/v1/edge/rpc-performance/:chain", async (req, res, next) => {
+  try {
+    const { chain } = req.params;
+    const { window, provider, vantage } = req.query;
+    const result = await getEdgeRpcPerformance(chain, window, { provider, vantage });
+    if (result === null) {
+      return res.status(400).json({ error: "invalid window -- use one of: 1h, 6h, 24h, 7d" });
+    }
+    res.json(result);
+  } catch (err) {
+    next(err);
+  }
+});
+
 // PATCH (2026-08-19): pay.sh internal proxy routes.
 //
 // pay.sh (https://pay.sh) runs its own payment gateway (`pay gate api`) on
@@ -1562,6 +1589,8 @@ app.get("/internal/paysh/v1/pokt/pulse", async (req, res, next) => {
     next(err);
   }
 });
+
+registerEdgeIngestRoute(app, edgeStore, constantTimeEqual);
 
 
 // Centralized error handler — never leak stack traces to paying callers.

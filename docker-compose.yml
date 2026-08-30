@@ -121,6 +121,10 @@ services:
       # http://searxng:8080 in code, only needs setting here if pointed
       # somewhere else.
       SEARXNG_URL: ${SEARXNG_URL}
+      EDGE_INTERNAL_KEY: ${EDGE_INTERNAL_KEY}
+      EDGE_RETENTION_DAYS: ${EDGE_RETENTION_DAYS}
+    volumes:
+      - edge-data:/app/data
     depends_on:
       - sol-rpc-cache
       - puppeteer-render
@@ -254,3 +258,4 @@ services:
 volumes:
   caddy_data:
   caddy_config:
+  edge-data:

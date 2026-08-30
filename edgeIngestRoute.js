@@ -1,3 +1,5 @@
+import express from "express";
+
 // edgeIngestRoute.js -- internal write endpoint for the Pi collector.
 //
 // Deliberately NOT registered in x402Middleware.js's routes map -- same
@@ -30,7 +32,7 @@ export function registerEdgeIngestRoute(app, edgeStore, constantTimeEqual) {
   }
   app.use("/internal/edge", requireEdgeKey);
 
-  app.post("/internal/edge/ingest", (req, res) => {
+  app.post("/internal/edge/ingest", express.json(), (req, res) => {
     const { vantage, measurements } = req.body || {};
     if (typeof vantage !== "string" || vantage.length === 0) {
       return res.status(400).json({ error: "missing vantage" });

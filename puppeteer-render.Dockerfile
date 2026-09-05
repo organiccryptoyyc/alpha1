@@ -24,7 +24,23 @@ WORKDIR /app
 COPY puppeteer-render-package.json package.json
 RUN npm install --omit=dev
 
-COPY puppeteer-render.js ./
+# BUG FIX (2026-09-05): this line originally read just
+# `COPY puppeteer-render.js ./` -- correct until puppeteer-render.js gained
+# a second local module (renderRequestGuard.js, the hard-timeout guard now
+# wrapping /pdf, /screenshot, /ocr), at which point that file stopped being
+# real: the build context (`context: .` in docker-compose.yml) can see
+# renderRequestGuard.js fine, nothing in .dockerignore excludes it, but this
+# Dockerfile never explicitly COPYed it in, so it was silently absent from
+# every built image regardless. Node's own `import "./renderRequestGuard.js"`
+# at the top of puppeteer-render.js then fails at container startup with an
+# immediate MODULE_NOT_FOUND -- confirmed live, not guessed: two separate
+# post-redeploy retests of GET /v1/render/pdf both 502'd fast (~1.3s, then
+# ~2.1s minutes later on a clean retry, ruling out a redeploy-timing race),
+# nowhere near the ~18-20s a genuine render hang or this project's own
+# timeout values would take -- exactly the signature of the upstream
+# container crash-looping (`restart: unless-stopped`) rather than anything
+# actually hanging.
+COPY puppeteer-render.js renderRequestGuard.js ./
 
 ENV PORT=3002
 EXPOSE 3002

@@ -84,6 +84,20 @@ added to give a single at-a-glance status point now that the per-round detail
 below has grown to 30+ dated sections. No application code changed with this
 update -- documentation and a backup branch only.
 
+**Update, 2026-09-05 -- all three payment networks now confirmed working
+end-to-end with real settlement, and a new backup checkpoint cut:**
+`backup/verified-working-2026-09-05-all-networks-confirmed` (from
+`edge-pulse` at commit `187fa84`). This is the first point in the project
+where Solana, Base, and peaq have each been paid-tested for real and every
+known bug found along the way is either fixed-and-confirmed-live or closed
+with a documented root cause -- see the dated sections below (peaq
+real-money mystery, Solana blockhash-staleness retries, and the
+Caddy/Cloudflare 502 mechanism) for the detail. Nothing outstanding from
+this round is an open bug; what's left is the pay.sh listing above, a few
+low-priority Cloudflare security settings (see the security-hardening
+section), and giving Base its own dated write-up with real per-route
+numbers the way Solana and peaq now have.
+
 ## Composite bundle routes (2026-08-24)
 
 Five bundle routes layered over already-shipped functions -- one call
@@ -1384,6 +1398,141 @@ of this app's own clean JSON response in the rarer case a page genuinely
 exceeds the render cap. That's a Caddy/Cloudflare-layer question now, not
 a resource-starvation one, and needs box-level log access to close out,
 not more application code.
+
+## Caddy/Cloudflare 502 mechanism -- closed to the evidence limit (2026-09-05)
+
+Continuing the open question at the end of the render/pdf section above:
+reproduced the hard-cap trip fresh (temporarily pointed a real paid test at
+`equium.ca` instead of the usual fast `pocket.network`, then reverted) and
+got the identical signature -- 19778ms, HTTP 502, Cloudflare's own raw
+branded page, embedded timestamp `2026-09-05 22:45:01 UTC`, $0 actually
+charged.
+
+Pulled `onchain-snapshot-caddy`'s own container log via Portainer at that
+exact moment -- a genuine hard reload, fetching "All logs" fresh from
+Docker, not a stale cached view. **Caddy's log was completely silent about
+this event.** Its last line was a routine ACME renewal check over an hour
+earlier (21:27:03 UTC); nothing at all appears for the 22:44-22:45 UTC
+window despite auto-refresh being on. Checked the actual `Caddyfile`: it's
+a minimal `reverse_proxy` straight to `onchain-snapshot-api:4021` with no
+`log` directive configured, so there's no full per-request access log --
+but Caddy always logs its own proxy-level errors (failed dials, resets)
+unconditionally, regardless of that setting.
+
+That silence is decisive: it means Caddy's own `reverse_proxy` handling
+completed without any error it noticed -- it didn't fail to reach the app,
+and it didn't itself terminate the connection. **This rules out Caddy's
+code/config as the source of the client seeing Cloudflare's generic page
+instead of the app's own clean JSON 502.** The fault sits between Caddy's
+own egress and Cloudflare's edge -- the physical network path, not
+anything this repo's code or config controls. A raw Cloudflare-branded 502
+specifically means Cloudflare's edge had its connection to the origin
+refused or reset (not timed out -- that's the already-ruled-out `524`),
+and this box's home router already has documented quirks in this project
+(the `caddy` service's own comments in `docker-compose.yml` explain the
+asymmetric port-forwarding and ISP-blocked-port-range workarounds already
+in place). The most plausible mechanism is the router's own
+NAT/connection-tracking silently dropping a long-idle proxied connection
+during the ~18-20s the render hard-cap holds it open with zero bytes
+flowing -- invisible to both Caddy's and the app's own logs, and not
+confirmable further without either the router's own connection-tracking
+logs (most consumer routers don't expose this) or Cloudflare's paid-tier
+origin-connection logging (Log Explorer/Logpush -- Enterprise/Workers-Paid
+only, not on this account's plan).
+
+**Status: closed as understood, narrow, not a code bug.** Real usage is
+unaffected -- render/pdf works, proven with real settlement in the section
+above -- and only the rarer over-cap case shows Cloudflare's generic error
+page instead of the app's own JSON, for reasons outside this repo's own
+code. Not pursuing further without new tooling/access on either the
+router or a paid Cloudflare tier. If ever worth revisiting: check the
+router's admin panel for an adjustable NAT/connection idle-timeout
+setting.
+
+## peaq: multi-session payment mystery resolved, all 9 tested routes confirmed live (2026-09-05)
+
+Context this section assumes, same as the Solana test-pass section above:
+a separate local test harness (not part of this repo) pays for live
+routes with a real wallet and confirms actual on-chain settlement. Across
+several sessions, real paid-mode requests to peaq (`eip155:3338`)
+consistently got errors claiming peaq's `accepts` entry was missing from
+this app's 402 challenge -- despite the static manifest, dry-runs, manual
+curl checks, a raw loopback request straight to this app's own port, and a
+plain Node `fetch()` all showing peaq correctly present in the live
+challenge every single time.
+
+Every server-side/infra theory got tested and falsified in turn, each with
+direct evidence rather than assumption: a facilitator-init race at
+container boot (`onchain-snapshot-api`'s `depends_on` in
+`docker-compose.yml` really is missing `peaq-facilitator`, and
+`peaq-facilitator` really has no healthcheck -- a legitimate latent risk,
+still true, just not this bug's cause -- falsified by a fresh container
+restart not changing the outcome, and a clean boot log with zero peaq
+mentions); `PEAQ_PAY_TO_ADDRESS` unset (falsified via a live container
+console `env | grep`); an x402 protocol-version mismatch (falsified -- the
+deployed facilitator's `/supported` endpoint correctly lists an
+`x402Version:2` entry for `eip155:3338`); and Caddy/Cloudflare/HTTP-
+protocol differences (falsified by a clean external `fetch()` showing all
+three networks present at the exact moment a harness run was
+simultaneously failing).
+
+**Actual root cause: the test harness's own client-side x402 SDK, not this
+app.** `@x402/core`'s `x402Client.applySpendControls()` silently drops any
+payment requirement whose asset isn't explicitly allow-listed by the
+caller AND isn't one of `@x402/evm`'s built-in default assets for that
+network -- and that SDK version's default-asset table has zero entries
+for `eip155:3338` at all. The harness's spend-control call never
+allow-listed peaq's asset, so peaq was silently filtered out of its own
+candidate list before its network-selection logic ever ran. Fixed
+harness-side (adding an explicit allow-list entry for peaq's bridged
+USDC); no change needed in this repo at all -- this app's peaq support was
+correct the entire time.
+
+**Status: confirmed live with real settlement, 2026-09-05 -- all 9 tested
+peaq routes now pass.** `eth/gas-price`, `sol/latest-block`,
+`peaq/gas-price`, `geo/ip`, `pokt/tokenomics`, `convert/heic-to-png`,
+`chain-snapshot/base`, `defi/precheck`, and `currency/convert` each
+settled with a decoded `payment-response` header and a real peaq
+transaction hash (`currency/convert` needed one retry after a transient
+facilitator-side "transaction receipt not found yet" race on the first
+attempt -- $0 charged that time, real settlement on retry). Real confirmed
+peaq spend: $0.093. The docker-compose `depends_on`/healthcheck gap noted
+above remains a real, unfixed latent risk worth addressing sometime, even
+though it wasn't the cause of anything observed this round.
+
+## Solana blockhash-staleness retries confirmed transient (2026-09-05)
+
+Two routes flagged earlier this round as "likely transient, worth a
+retry" -- `image/ocr` and `uprock/verify` -- had failed with
+`invalid_exact_svm_payload_transaction_simulation_failed: ...
+BlockhashNotFound`, the facilitator's pre-settlement simulation step
+rejecting because the transaction's blockhash was no longer recognized by
+the time it checked. Retried both fresh: `image/ocr`'s first retry failed
+with the identical error, but an immediate second retry passed clean with
+real settlement; `uprock/verify` passed clean on its first retry. A
+fail/pass pair on the identical route under identical conditions confirms
+this is genuinely intermittent, consistent with Solana's short (~60-90s)
+blockhash validity window occasionally being exceeded by RPC/network
+latency between the client fetching a blockhash and the facilitator's
+simulation step -- the same category of issue that motivated adding the
+`sol-rpc-cache` proxy earlier in this project (see `sol-rpc-cache.mjs`,
+`docker-compose.yml`).
+
+**Status: closed as known, intermittent, not blocking real usage.** Both
+routes work; this is the last open item from the project's original
+Solana test pass.
+
+## Base network confirmed working end-to-end (documented here for completeness)
+
+Base (`eip155:8453`) paid testing was run and confirmed working in an
+earlier session -- a full real-money pass with every tested route
+settling successfully. That session's exact per-route transaction data
+wasn't captured into this README at the time; flagging the gap here
+rather than inventing numbers. A fresh, fully-documented Base run with
+real captured transaction hashes (matching the level of detail the Solana
+and peaq sections above have) is the one piece of bookkeeping left on the
+roadmap -- not a known bug, just an unfilled record.
+
 
 ## Routes and pricing
 

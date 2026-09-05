@@ -2234,10 +2234,22 @@ export async function getX402SellerTrust(baseUrl) {
 // that service (same "check once, at the edge closest to the caller"
 // pattern already established in this file).
 const PUPPETEER_RENDER_URL = process.env.PUPPETEER_RENDER_URL || "http://puppeteer-render:3002";
-// Above puppeteer-render.js's own 15s navigation timeout, so THAT service's
-// more specific error (e.g. "render failed: Navigation timeout...") surfaces
-// to the caller instead of this file's generic "unreachable" message racing
-// it.
+// BUG FIX (2026-09-05): this comment originally said "above puppeteer-
+// render.js's own 15s navigation timeout" -- true, but incomplete: that 15s
+// (NAV_TIMEOUT_MS there) only ever bounded page.goto(), not the render step
+// itself (page.pdf()/page.screenshot()/OCR), which had no timeout of its own
+// at all. A page that navigated fine but then hung while rendering could run
+// past this 20s ceiling with nothing on the other end to produce puppeteer-
+// render.js's own specific error first -- this file's fetch would eventually
+// abort here, but the render service's own request just kept running,
+// pinning one of its few concurrency slots shut. puppeteer-render.js now has
+// its own REQUEST_TIMEOUT_MS (18s) covering the whole request, comfortably
+// under this 20s figure -- so THAT service's own specific error (e.g.
+// "pdf render failed: Navigation timeout..." or the new "exceeded 18000ms
+// hard cap") should now reliably surface to the caller before this file's
+// generic "unreachable" message would. This 20s figure stays as the outer
+// safety net for the case that service is genuinely unreachable (crashed,
+// network partition) rather than merely slow.
 const RENDER_TIMEOUT_MS = 20_000;
 
 export async function getPuppeteerScreenshot(targetUrl) {
@@ -2363,6 +2375,17 @@ export async function getPuppeteerPdf(targetUrl, { format, landscape } = {}) {
     throw new Error("url must not target a localhost, private, or link-local address");
   }
 
+  // Timing log added 2026-09-05 alongside puppeteer-render.js's own
+  // REQUEST_TIMEOUT_MS fix -- if the render/pdf Cloudflare-502 symptom this
+  // project's README documents ever recurs after that fix, this line
+  // (cross-referenced against puppeteer-render.js's own "pdf nav complete" /
+  // "pdf generation complete" / "exceeded ...ms hard cap" log lines from the
+  // same request) is what will show whether this file's own 20s abort ever
+  // actually fires at all, or whether something else entirely is cutting the
+  // connection before that -- exactly the kind of real container-log
+  // evidence that resolved the DNS-lookup bug earlier in this file's history,
+  // instead of guessing.
+  const startedAt = Date.now();
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), RENDER_TIMEOUT_MS);
   let res;
@@ -2373,7 +2396,11 @@ export async function getPuppeteerPdf(targetUrl, { format, landscape } = {}) {
       body: JSON.stringify({ url: parsed.toString(), format, landscape }),
       signal: controller.signal,
     });
+    console.log(`[render/pdf] puppeteer-render responded at ${Date.now() - startedAt}ms, HTTP ${res.status}`);
   } catch (err) {
+    console.error(
+      `[render/pdf] fetch to puppeteer-render failed/aborted at ${Date.now() - startedAt}ms: ${err.message}`
+    );
     throw new Error(`puppeteer-render service unreachable: ${err.message}`);
   } finally {
     clearTimeout(timeout);

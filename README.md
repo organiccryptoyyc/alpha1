@@ -1329,23 +1329,61 @@ back-to-back hangs, instead of silently wedging shut. Both test files
 ship in this commit; both pass. `node --check` syntax-validated on every
 edited/new file.
 
-**Status and honest confidence level: fixed and verified offline; NOT yet
-deployed or live-retested.** This closes a real, confirmed-by-reading-the-
-code resource-starvation bug regardless of anything else, and is worth
-shipping on its own merits. What it does NOT yet prove is that this is the
-*complete* explanation for the specific Cloudflare-branded 502 page the
-client saw -- that still needs a live retest to close out fully, the same
-way the DNS-lookup bug needed real container logs rather than static
-reading alone. Once deployed: retest `GET /v1/render/pdf` against a normal
-page first (should now succeed, or fail with THIS service's own clean JSON
-error/504 instead of a raw Cloudflare page), then -- more importantly --
-against a deliberately slow-to-render page if one can be found or built,
-to actually exercise the hard cap for real and confirm the client gets a
-clean `504` end-to-end through Caddy and Cloudflare rather than a raw
-"Bad Gateway" page. If the Cloudflare-branded page still appears even
-after this fix, that's real evidence something Caddy/Cloudflare-side is
-*also* involved and needs the same live-log-access treatment the DNS bug
-got before this can be called fully closed.
+**Status, 2026-09-05: the resource-starvation bug itself is now CONFIRMED
+FIXED in live production** -- proven twice over, not just read from code.
+Deployment surfaced one real bug along the way, and the live retests
+surfaced one narrower, separate open question -- both below, honestly.
+
+**Deployment bug found and fixed:** `puppeteer-render.Dockerfile` only
+ever explicitly `COPY`ed `puppeteer-render.js` itself -- correct until this
+fix added a second local module (`renderRequestGuard.js`), at which point
+that file silently never made it into the built image regardless of the
+build context seeing it fine. Node's own `import "./renderRequestGuard.js"`
+then failed at container startup with an immediate `MODULE_NOT_FOUND`,
+crash-looping the container (`restart: unless-stopped`) -- confirmed live
+via two fast (~1.3s, ~2.1s) 502s on a clean retry (ruling out a redeploy-
+timing race), nowhere near the ~18-20s a genuine render hang would take.
+Fixed with `COPY puppeteer-render.js renderRequestGuard.js ./`; confirmed
+resolved via Portainer showing the container back to steady `healthy`.
+
+**First live retest after that fix, against the usual `equium.ca` test
+page, genuinely exercised the hard cap for real** -- confirmed directly
+from both containers' own logs, not inferred: `puppeteer-render` logged
+`pdf nav complete for https://www.equium.ca/ at 7699ms` then `pdf render
+exceeded 18000ms hard cap -- responding 504; abandoned work will be
+force-cleaned once it actually settles`; the main app logged `[render/pdf]
+puppeteer-render responded at 18034ms, HTTP 504` and threw the matching
+error. The hard cap fired exactly as designed and cleanly released its
+resource. But the client still received Cloudflare's own raw "502: Bad
+Gateway" HTML page instead of this app's own small JSON 502 body, even
+though the app's own error handler (`res.status(502).json(...)`, fully
+synchronous) should produce that near-instantly. Checked Cloudflare's own
+documented timeout behavior rather than guess further: their "waiting on
+origin" timeout is a fixed 100 seconds on every plan and produces a
+distinct `524` error -- not `502` -- so this ~19-20s pattern isn't
+Cloudflare's edge simply timing out. Something between the app and
+Cloudflare (most likely Caddy, or the docker network path) appears to be
+resetting or dropping the connection before the app's own fast response
+can be relayed, independent of anything this fix's own code does. Left
+open deliberately, same as the original Caddy/Cloudflare question --
+pinning it down needs Caddy's own access/error logs on the box, the exact
+standard that resolved the DNS-lookup bug, not another guess.
+
+**Second live retest, against `pocket.network` (a page that renders well
+inside the 18s cap), succeeded cleanly end-to-end**: real Solana payment
+settled (transaction
+`5saTFN8HvLWiQnYCM3Eiu4EA2a4yEd54VSTfh3W7PceMjRPVrKFWWkkvqN6JQBjGSykAhX3DmAmn7Z2oHtQUFM6S`,
+$0.01 charged), a valid PDF returned, 6.5 seconds total -- nowhere near the
+hard cap. This is the fix's actual purpose confirmed working in production
+with real settlement: a normal render now completes normally.
+
+**Bottom line:** what remains open is narrower than originally scoped --
+not "does render/pdf work" (it does, proven with real settlement above),
+but specifically why the client still sees a raw Cloudflare error instead
+of this app's own clean JSON response in the rarer case a page genuinely
+exceeds the render cap. That's a Caddy/Cloudflare-layer question now, not
+a resource-starvation one, and needs box-level log access to close out,
+not more application code.
 
 ## Routes and pricing
 

@@ -26,7 +26,10 @@
 // A small semaphore caps how many pages can be open at once
 // (MAX_CONCURRENT_PAGES) so a burst of requests queues briefly instead of
 // piling on and OOMing the container; queued requests still complete, just
-// serially past the cap, bounded by NAV_TIMEOUT_MS per page.
+// serially past the cap, bounded by REQUEST_TIMEOUT_MS per page (see
+// renderRequestGuard.js -- NAV_TIMEOUT_MS alone used to be the only bound
+// here, but it only covers page.goto(), not the render/OCR step after it,
+// which is exactly the gap that let a slow page pin a slot open forever).
 //
 // SECURITY: the caller-supplied URL is only navigated to and screenshotted,
 // never executed server-side beyond what any browser does loading a page.
@@ -40,11 +43,26 @@
 import express from "express";
 import puppeteer from "puppeteer-core";
 import { createWorker } from "tesseract.js";
+import { runWithHardCap } from "./renderRequestGuard.js";
 
 const PORT = process.env.PORT || 3002;
 const EXECUTABLE_PATH = process.env.PUPPETEER_EXECUTABLE_PATH || "/usr/bin/chromium-browser";
 const MAX_CONCURRENT_PAGES = 2;
 const NAV_TIMEOUT_MS = 15_000;
+// BUG FIX (2026-09-05): NAV_TIMEOUT_MS above only bounds page.goto() --
+// page.pdf(), page.screenshot(), and worker.recognize() (OCR) have no
+// timeout of their own. A page that navigates fine but then hangs while
+// doing the real work could previously run forever, pinning one of only
+// MAX_CONCURRENT_PAGES semaphore slots shut for good -- see
+// renderRequestGuard.js for the full mechanism and why this was worth
+// fixing regardless of what exactly produces the render/pdf Cloudflare-502
+// symptom documented in this project's README. Set comfortably above
+// NAV_TIMEOUT_MS (room for the render/OCR step itself once navigation
+// succeeds) and comfortably below the main app's own RENDER_TIMEOUT_MS
+// (dataSources.js, 20s) -- so THIS service's own specific error always wins
+// that race and reaches the caller, instead of the request hanging here
+// while the caller gives up first and gets nothing.
+const REQUEST_TIMEOUT_MS = 18_000;
 const VIEWPORT = { width: 1280, height: 800 };
 
 const app = express();
@@ -102,24 +120,41 @@ app.post("/screenshot", async (req, res) => {
 
   await acquireSlot();
   let page;
+  const startedAt = Date.now();
   try {
-    const b = await ensureBrowser();
-    page = await b.newPage();
-    await page.setViewport(VIEWPORT);
-    const response = await page.goto(url, {
-      waitUntil: "networkidle2",
-      timeout: NAV_TIMEOUT_MS,
+    await runWithHardCap({
+      res,
+      ms: REQUEST_TIMEOUT_MS,
+      label: "screenshot render",
+      onTimeout: () => {
+        // Force-close the page so a page.screenshot() hung past the cap
+        // rejects promptly instead of grinding on in the background forever
+        // -- this is what actually frees the semaphore slot back up soon
+        // after the client gets its 504, instead of holding it forever (see
+        // renderRequestGuard.js for why that matters more than "one slow
+        // request").
+        if (page) page.close().catch(() => {});
+      },
+      run: async () => {
+        const b = await ensureBrowser();
+        page = await b.newPage();
+        await page.setViewport(VIEWPORT);
+        const response = await page.goto(url, {
+          waitUntil: "networkidle2",
+          timeout: NAV_TIMEOUT_MS,
+        });
+        console.log(`[puppeteer-render] screenshot nav complete for ${url} at ${Date.now() - startedAt}ms`);
+        const buffer = await page.screenshot({ type: "png" });
+        console.log(`[puppeteer-render] screenshot capture complete for ${url} at ${Date.now() - startedAt}ms`);
+        return {
+          statusCode: response ? response.status() : null,
+          width: VIEWPORT.width,
+          height: VIEWPORT.height,
+          screenshotBase64: buffer.toString("base64"),
+        };
+      },
+      formatError: (err) => ({ status: 502, body: { error: `render failed: ${err.message}` } }),
     });
-    const buffer = await page.screenshot({ type: "png" });
-    res.json({
-      statusCode: response ? response.status() : null,
-      width: VIEWPORT.width,
-      height: VIEWPORT.height,
-      screenshotBase64: buffer.toString("base64"),
-    });
-  } catch (err) {
-    console.error("[puppeteer-render] render failed:", err.message);
-    res.status(502).json({ error: `render failed: ${err.message}` });
   } finally {
     if (page) await page.close().catch(() => {});
     releaseSlot();
@@ -132,27 +167,41 @@ app.post("/pdf", async (req, res) => {
 
   await acquireSlot();
   let page;
+  const startedAt = Date.now();
   try {
-    const b = await ensureBrowser();
-    page = await b.newPage();
-    await page.setViewport(VIEWPORT);
-    const response = await page.goto(url, {
-      waitUntil: "networkidle2",
-      timeout: NAV_TIMEOUT_MS,
+    await runWithHardCap({
+      res,
+      ms: REQUEST_TIMEOUT_MS,
+      label: "pdf render",
+      onTimeout: () => {
+        // Same reasoning as /screenshot above: force the page closed so a
+        // page.pdf() hung past the cap rejects promptly instead of holding
+        // this request's semaphore slot shut indefinitely.
+        if (page) page.close().catch(() => {});
+      },
+      run: async () => {
+        const b = await ensureBrowser();
+        page = await b.newPage();
+        await page.setViewport(VIEWPORT);
+        const response = await page.goto(url, {
+          waitUntil: "networkidle2",
+          timeout: NAV_TIMEOUT_MS,
+        });
+        console.log(`[puppeteer-render] pdf nav complete for ${url} at ${Date.now() - startedAt}ms`);
+        const buffer = await page.pdf({
+          format: format || "Letter",
+          landscape: !!landscape,
+          printBackground: true,
+        });
+        console.log(`[puppeteer-render] pdf generation complete for ${url} at ${Date.now() - startedAt}ms`);
+        return {
+          statusCode: response ? response.status() : null,
+          format: format || "Letter",
+          pdfBase64: buffer.toString("base64"),
+        };
+      },
+      formatError: (err) => ({ status: 502, body: { error: `pdf render failed: ${err.message}` } }),
     });
-    const buffer = await page.pdf({
-      format: format || "Letter",
-      landscape: !!landscape,
-      printBackground: true,
-    });
-    res.json({
-      statusCode: response ? response.status() : null,
-      format: format || "Letter",
-      pdfBase64: buffer.toString("base64"),
-    });
-  } catch (err) {
-    console.error("[puppeteer-render] pdf render failed:", err.message);
-    res.status(502).json({ error: `pdf render failed: ${err.message}` });
   } finally {
     if (page) await page.close().catch(() => {});
     releaseSlot();
@@ -176,17 +225,34 @@ app.post("/ocr", async (req, res) => {
   if (!imageBase64) return res.status(400).json({ error: "imageBase64 is required" });
 
   await acquireSlot();
+  const startedAt = Date.now();
   try {
-    const worker = await ensureOcrWorker();
-    const buffer = Buffer.from(imageBase64, "base64");
-    const { data } = await worker.recognize(buffer);
-    res.json({
-      text: data.text,
-      confidence: data.confidence,
+    await runWithHardCap({
+      res,
+      ms: REQUEST_TIMEOUT_MS,
+      label: "ocr",
+      onTimeout: () => {
+        // worker.recognize() has no timeout of its own, and unlike a Chrome
+        // page there's no cheap "just this request's work" handle to close
+        // -- ocrWorker is a single shared, reused instance (see
+        // ensureOcrWorker() below), not created fresh per request. The only
+        // way to actually stop a hung recognize() call is to terminate the
+        // whole worker; null it out here first so the next request
+        // transparently creates a fresh one instead of reusing a worker
+        // whose in-flight call this just killed out from under it.
+        const stuckWorker = ocrWorker;
+        ocrWorker = null;
+        if (stuckWorker) stuckWorker.terminate().catch(() => {});
+      },
+      run: async () => {
+        const worker = await ensureOcrWorker();
+        const buffer = Buffer.from(imageBase64, "base64");
+        const { data } = await worker.recognize(buffer);
+        console.log(`[puppeteer-render] ocr complete at ${Date.now() - startedAt}ms`);
+        return { text: data.text, confidence: data.confidence };
+      },
+      formatError: (err) => ({ status: 502, body: { error: `ocr failed: ${err.message}` } }),
     });
-  } catch (err) {
-    console.error("[puppeteer-render] ocr failed:", err.message);
-    res.status(502).json({ error: `ocr failed: ${err.message}` });
   } finally {
     releaseSlot();
   }

@@ -51,9 +51,10 @@ this README shipped, was pushed to `main`, redeployed via Portainer, and
 live-payment-tested against the production URL before being marked done --
 **except the newest one, "First real end-to-end paid Solana test pass, and
 a DNS-lookup bug fix (2026-09-05)," which breaks that pattern on purpose:
-it's a code fix for a bug found during the project's first real paid test
-pass, confirmed correct offline, but not yet deployed or live-retested.**
-Read that section's own "Status" note before assuming it's live.
+it covers two separate fixes found during the project's first real paid
+test pass, at two different stages -- one confirmed live via a real paid
+retest, one fixed in code but not yet deployed or live-retested.** Read
+that section's own "Status" notes before assuming either is live.
 Most recent: 5 composite bundle routes (chain-snapshot, wallet-risk,
 domain-trust, defi/precheck, pokt/pulse -- see "Composite bundle routes"
 below) layered over already-shipped functions, plus an unrelated x402
@@ -1182,14 +1183,57 @@ in whichever shape was actually requested, matching Node's documented
 itself (the resolve-once/pin/check-every-address logic above it is
 untouched) -- only the shape of what gets handed to `undici` changed.
 
-**Status:** fixed and syntax-checked in this commit; confirmed via an
-isolated offline reproduction (not a live call) that the old code
-reproduces the exact production error and the new code resolves it. Not
-yet redeployed or live-payment-retested against production. Next step
-once deployed: retry `GET /v1/convert/heic-to-png` and
-`GET /v1/x402/seller-trust/example.com` for real and confirm both settle
-cleanly -- this section should be updated with that result, good or bad,
-once it's done.
+**Status:** fixed, deployed, and confirmed live in production. Retested
+for real after deploy (2026-09-05): `GET /v1/convert/heic-to-png` settled
+cleanly with a real, on-chain-verified Solana payment (transaction
+`4G3GrGgZezdzqsJNPfCcQBHpnzdRL3qW8R3HvwvYv4Mr4kje5oxPU79uKUTEwVxEz7zSX9LG1LaLjASGDujgF3gC`,
+payment-response header decoded, valid PNG returned) -- the DNS-lookup
+fix above is confirmed working in production, not just offline.
+`GET /v1/x402/seller-trust/example.com` was retested the same pass and
+still failed -- but that turned out to be a completely separate,
+unrelated bug, not a sign this fix is incomplete. See the next section.
+
+## Separate seller-trust bug found during the same retest: bad discovery-extension example (2026-09-05)
+
+Retesting `GET /v1/x402/seller-trust/example.com` after the DNS-lookup fix
+above still failed, live, with what looked like the same kind of bare
+Cloudflare "502: Bad Gateway" page. Pulling this container's own logs
+(same method as the DNS bug above) showed the real cause has nothing to
+do with DNS resolution or `undici` at all:
+
+```
+Error: baseUrl must be a valid absolute URL, e.g. https://example.com:8443
+    at getX402SellerTrust (file:///app/dataSources.js:2145:11)
+```
+
+`getX402SellerTrust(baseUrl)` requires a full, absolute URL with a scheme
+-- and correctly does NOT default to `https://` on its own if one is
+missing, since a real seller can run on a non-default port (this box's
+own listing being the obvious example, at `:8443`), so silently guessing
+a scheme+port would be a real behavior change, not a safe default. But
+this route's own discovery-extension declaration in `x402Middleware.js`
+advertised its example path parameter as the bare string "example.com"
+-- not a valid absolute URL, and not percent-encoded either, despite the
+route handler's own comment requiring callers to `encodeURIComponent()` a
+full "https://..." seller URL as the path segment. Both Bazaar-style
+discovery crawlers and this project's own test harness pull that
+advertised example verbatim to build their test/discovery call, so the
+manifest itself was telling every caller to make a request that
+immediately throws -- unrelated to, and pre-dating, the DNS-lookup bug
+above.
+
+**Fix:** the discovery extension's example value is now
+`encodeURIComponent("https://example.com")` (`"https%3A%2F%2Fexample.com"`),
+matching the format the route actually requires. No change to
+`getX402SellerTrust()`'s own validation -- it was already doing the right
+thing by rejecting a bare domain; the manifest's example was just wrong.
+
+**Status:** fixed and syntax-checked in this commit. Not yet deployed or
+live-retested. Once deployed, re-run
+`GET /v1/x402/seller-trust/https%3A%2F%2Fexample.com` (or any other
+properly-encoded absolute URL) for real and confirm it settles cleanly --
+a smaller, more mechanical fix than the DNS-lookup one above, but it
+deserves the same real-money confirmation before calling it done.
 
 **Separately diagnosed this same pass, NOT fixed here -- left TBD
 deliberately:** `GET /v1/render/pdf` failed live with a ~20.3-second-long

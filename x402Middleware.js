@@ -212,9 +212,44 @@ class CdpV1CompatFacilitatorClient {
     }
   }
   async settle(paymentPayload, paymentRequirements) {
+    const startedAt = Date.now();
     try {
       const { wirePayload, wireRequirements } = toCdpWireShape(paymentPayload, paymentRequirements);
-      return await this.inner.settle(wirePayload, wireRequirements);
+      const result = await this.inner.settle(wirePayload, wireRequirements);
+      // DIAGNOSTIC (2026-09-05): a real GET /v1/uprock/verify settle failure
+      // (errorReason invalid_exact_svm_payload_transaction_simulation_failed,
+      // "simulation failed: transaction would fail on-chain: BlockhashNotFound")
+      // came back from CDP as a clean, non-throwing { success: false, ... }
+      // response -- the catch block below never saw it, so nothing was
+      // logged anywhere on this box for that incident, and the real cause
+      // couldn't be confirmed after the fact. uprock/verify is the one route
+      // whose own real work (pollSweepUntilDone in dataSources.js, up to
+      // VERIFY_MAX_WAIT_MS=45s of live UpRock polling) can run long enough,
+      // combined with sol-rpc-cache's own up-to-20s-stale cached blockhash
+      // (see sol-rpc-cache.mjs), that the blockhash embedded in the client's
+      // already-signed payment plausibly goes stale -- or hits a
+      // lagging/inconsistent node behind the shared rate-limited RPC already
+      // implicated elsewhere in this project (see README) -- before settle
+      // is even attempted, since @x402/express only settles after this
+      // route's slow handler finishes. Logging this now so the NEXT
+      // occurrence leaves real evidence (the exact blockhash/slot this
+      // payment was built against, network/scheme, and how long settle()
+      // itself took) instead of only a plausible theory.
+      if (result && result.success === false) {
+        console.error(
+          "[x402][CDP settle] returned success:false --",
+          JSON.stringify({
+            resource: paymentPayload && paymentPayload.resource,
+            network: wireRequirements && wireRequirements.network,
+            scheme: wireRequirements && wireRequirements.scheme,
+            extra: wireRequirements && wireRequirements.extra,
+            errorReason: result.errorReason,
+            errorMessage: result.errorMessage,
+            settleElapsedMs: Date.now() - startedAt,
+          })
+        );
+      }
+      return result;
     } catch (error) {
       console.error("[x402][CDP settle] threw:", error && error.stack ? error.stack : error);
       throw error;

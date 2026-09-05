@@ -1331,7 +1331,13 @@ async function resolveVerifiedDispatcher(hostname) {
   const { Agent } = await import("undici");
   return new Agent({
     connect: {
-      lookup: (_hostname, _options, callback) => callback(null, pinnedIp, family),
+      lookup: (_hostname, options, callback) => {
+        if (options && options.all) {
+          callback(null, [{ address: pinnedIp, family }]);
+        } else {
+          callback(null, pinnedIp, family);
+        }
+      },
     },
   });
 }

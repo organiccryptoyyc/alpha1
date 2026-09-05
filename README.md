@@ -48,7 +48,12 @@ then `v2.0a` through `v2.0z`, and so on if this project outlives the alphabet.
 list -- the pricing table further down this README is illustrative, not
 exhaustive (it predates most of the routes below). Every dated section in
 this README shipped, was pushed to `main`, redeployed via Portainer, and
-live-payment-tested against the production URL before being marked done.
+live-payment-tested against the production URL before being marked done --
+**except the newest one, "First real end-to-end paid Solana test pass, and
+a DNS-lookup bug fix (2026-09-05)," which breaks that pattern on purpose:
+it's a code fix for a bug found during the project's first real paid test
+pass, confirmed correct offline, but not yet deployed or live-retested.**
+Read that section's own "Status" note before assuming it's live.
 Most recent: 5 composite bundle routes (chain-snapshot, wallet-risk,
 domain-trust, defi/precheck, pokt/pulse -- see "Composite bundle routes"
 below) layered over already-shipped functions, plus an unrelated x402
@@ -406,6 +411,14 @@ Live-verified working call, for reference:
 ```
 node pay-test-debug.mjs "/v1/x402/seller-trust/https%3A%2F%2Forganiccryptoyyc.com%3A8443"
 ```
+
+**Update (2026-09-05):** a real-money test pass found this route failing
+again, live -- a *different* failure than the one above (this one never
+even reaches payment verification; it's a crash inside the route's own
+outbound DNS-pinned fetch). The size/discovery-metadata fix above is still
+correct and untouched. See "First real end-to-end paid Solana test pass,
+and a DNS-lookup bug fix (2026-09-05)" further down for the new root cause
+and fix.
 
 ## puppeteer-render: headless-Chrome screenshots (2026-08-15)
 
@@ -1118,6 +1131,85 @@ APY is a live snapshot that changes constantly, projected earnings assume
 the current rate holds for the full period, and smart-contract/
 impermanent-loss/price risk all apply. The user executes and accepts any
 resulting transaction themselves.
+
+## First real end-to-end paid Solana test pass, and a DNS-lookup bug fix (2026-09-05)
+
+Context this section assumes: a separate local test harness (not part of
+this repo) was built to pay for every live route with a real, small-funds
+Solana wallet and confirm actual on-chain settlement, rather than trusting
+a 200 status alone. This is the first time this project's payment path was
+tested end-to-end with real money rather than just reviewed. Full raw
+results live outside this repo; this section only records what changed
+*here* as a result.
+
+**Fixed and verified offline, not yet live-retested after deploy:**
+
+`resolveVerifiedDispatcher()` in `dataSources.js` (added 2026-08-27 for the
+DNS-rebinding SSRF hardening -- see "Security hardening" below) pins a
+caller-supplied hostname's resolved IP and hands it to `undici` via a
+custom `connect.lookup` function. That custom function always answered in
+the single-address callback shape (`callback(null, address, family)`),
+never the array shape (`callback(null, [{address, family}])`) that Node's
+own `dns.lookup()` contract requires when the caller passes `options.all`.
+Node 20+ defaults `net.autoSelectFamily` to `true`, and its own
+`net`/`tls` connection code (`lookupAndConnectMultiple`) calls *any*
+custom lookup function -- including this one -- with `options.all` set.
+The mismatch meant Node tried to connect to `undefined`, surfacing as:
+
+```
+TypeError: fetch failed
+  [cause]: TypeError [ERR_INVALID_IP_ADDRESS]: Invalid IP address: undefined
+```
+
+This is exactly what a live run against `GET /v1/convert/heic-to-png`
+produced (confirmed from this container's own logs, not guessed), and
+this function is shared by every route in this file that fetches a
+caller-supplied URL itself: `getHeicToPng`, `getImageOcr`,
+`probeSellerResource` (used by `getX402SellerTrust` --
+`/v1/x402/seller-trust`), `fetchManifestAt` (used by
+`getX402SellerTrust`'s manifest check), `probePoktSupplierEndpoint`, and
+the ERC-8004 registration-file fetch in `getAgentReputation`. It reproduced
+consistently in isolated, fully offline testing (a local loopback HTTP
+server, no external network involved) against the exact lookup pattern
+used here -- not reliably on every single live call in production (one
+live retest of `image/ocr` against a different external host succeeded
+before this fix shipped), which fits a race/branch in Node's own
+connection-attempt logic rather than something host-specific.
+
+**Fix:** the custom `lookup` function now checks `options.all` and answers
+in whichever shape was actually requested, matching Node's documented
+`dns.lookup()` contract. No behavior change for the SSRF-hardening logic
+itself (the resolve-once/pin/check-every-address logic above it is
+untouched) -- only the shape of what gets handed to `undici` changed.
+
+**Status:** fixed and syntax-checked in this commit; confirmed via an
+isolated offline reproduction (not a live call) that the old code
+reproduces the exact production error and the new code resolves it. Not
+yet redeployed or live-payment-retested against production. Next step
+once deployed: retry `GET /v1/convert/heic-to-png` and
+`GET /v1/x402/seller-trust/example.com` for real and confirm both settle
+cleanly -- this section should be updated with that result, good or bad,
+once it's done.
+
+**Separately diagnosed this same pass, NOT fixed here -- left TBD
+deliberately:** `GET /v1/render/pdf` failed live with a ~20.3-second-long
+request ending in a bare Cloudflare "502: Bad Gateway" page (Cloudflare's
+own error page, not this app's JSON error shape -- meaning the connection
+itself broke, not that the app returned a clean error status). `RENDER_TIMEOUT_MS`
+(20 seconds, in `dataSources.js`, guarding the call to the separate
+`puppeteer-render` container) is a real, correlated data point -- the
+observed failure duration matches it closely and repeated near-identically
+across two separate live attempts (20326ms, then 20371ms). But this
+repo's `Caddyfile` sets no explicit `reverse_proxy` timeout, so exactly
+what enforces the ~20s ceiling the client actually experiences (Cloudflare's
+own edge timeout vs. something else) isn't pinned down with the same
+confidence as the DNS-lookup bug above -- deliberately not "fixed" by
+guessing at a timeout value without being able to confirm which layer is
+actually cutting the connection. Needs either a live retest with Caddy/
+Cloudflare access to watch the actual cutoff, or a smaller, safer
+first step: lowering `RENDER_TIMEOUT_MS` to fail fast with more headroom
+and see if that alone is enough, without touching anything else. Left as
+an open item for a follow-up change, not bundled into this commit.
 
 ## Routes and pricing
 

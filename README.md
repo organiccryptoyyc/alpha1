@@ -1255,25 +1255,97 @@ confirmed by this retest actually settling and returning real data.
 Left as-is: touching either the double-encode or the double-decode side
 alone would break the other.
 
-**Separately diagnosed this same pass, NOT fixed here -- left TBD
-deliberately:** `GET /v1/render/pdf` failed live with a ~20.3-second-long
-request ending in a bare Cloudflare "502: Bad Gateway" page (Cloudflare's
-own error page, not this app's JSON error shape -- meaning the connection
-itself broke, not that the app returned a clean error status). `RENDER_TIMEOUT_MS`
-(20 seconds, in `dataSources.js`, guarding the call to the separate
+**Originally diagnosed this same pass, left TBD at the time:** `GET
+/v1/render/pdf` failed live with a ~20.3-second-long request ending in a
+bare Cloudflare "502: Bad Gateway" page (Cloudflare's own error page, not
+this app's JSON error shape -- meaning the connection itself broke, not
+that the app returned a clean error status). `RENDER_TIMEOUT_MS` (20
+seconds, in `dataSources.js`, guarding the call to the separate
 `puppeteer-render` container) is a real, correlated data point -- the
 observed failure duration matches it closely and repeated near-identically
 across two separate live attempts (20326ms, then 20371ms). But this
 repo's `Caddyfile` sets no explicit `reverse_proxy` timeout, so exactly
 what enforces the ~20s ceiling the client actually experiences (Cloudflare's
-own edge timeout vs. something else) isn't pinned down with the same
-confidence as the DNS-lookup bug above -- deliberately not "fixed" by
-guessing at a timeout value without being able to confirm which layer is
-actually cutting the connection. Needs either a live retest with Caddy/
-Cloudflare access to watch the actual cutoff, or a smaller, safer
-first step: lowering `RENDER_TIMEOUT_MS` to fail fast with more headroom
-and see if that alone is enough, without touching anything else. Left as
-an open item for a follow-up change, not bundled into this commit.
+own edge timeout vs. something else) wasn't pinned down with the same
+confidence as the DNS-lookup bug above at the time -- deliberately not
+"fixed" by guessing at a timeout value without being able to confirm which
+layer was actually cutting the connection.
+
+## render/pdf: a real, confirmed defect found and fixed -- the Cloudflare-502 mechanism itself still needs a live retest to fully close (2026-09-05)
+
+Went back to actually read `puppeteer-render.js` (the separate container
+`getPuppeteerPdf`/`getPuppeteerScreenshot` hand off to) rather than keep
+guessing at Caddy/Cloudflare configuration. Found a real, confirmable-from-
+the-code defect, independent of anything Cloudflare-side: `NAV_TIMEOUT_MS`
+(15s) there only ever bounded `page.goto()` -- navigation. Neither
+`page.pdf()`, `page.screenshot()`, nor Tesseract's `worker.recognize()`
+(OCR) had any timeout of their own. A page that navigates fine but then
+hangs while doing the actual work (heavy web fonts, a runaway script, an
+infinite CSS animation, print-media quirks, a corrupt/huge image for OCR)
+could previously run forever with nothing to stop it.
+
+That's worse than one slow request: every route in `puppeteer-render.js`
+shares one small `MAX_CONCURRENT_PAGES` (2) semaphore. A hung `page.pdf()`
+call never reaches its own `finally { releaseSlot() }`, so after just 2
+stuck requests this entire service would silently stop accepting ANY new
+render/screenshot/OCR work -- no crash, nothing logged, every future
+request just queuing forever. This is a very plausible mechanism behind
+the render/pdf failures actually seen in production: a slow-to-render page
+eating a concurrency slot that never comes back, independent of whatever
+exactly produces the Cloudflare-branded 502 the client saw.
+
+**Fix:** a new, dependency-free `renderRequestGuard.js` module wraps each of
+the three routes (`/screenshot`, `/pdf`, `/ocr`) in a hard wall-clock cap
+(`REQUEST_TIMEOUT_MS`, 18s -- above `NAV_TIMEOUT_MS` so the render/OCR step
+itself still gets real headroom, below the main app's own 20s
+`RENDER_TIMEOUT_MS` so this service's own specific error always wins that
+race and reaches the caller). If the cap trips, the route force-releases
+whatever it's holding (closes the Chrome page for `/screenshot`/`/pdf`;
+terminates and recreates the shared Tesseract worker for `/ocr`, since
+that one's a single reused instance rather than created fresh per request)
+so the abandoned work actually unwinds and the slot frees back up soon,
+instead of holding it shut indefinitely. The guard is written so a caller
+cannot accidentally send two responses for one request (an earlier draft
+of this fix almost did exactly that) -- `run()` only ever returns data or
+throws, never touches `res` itself; the guard alone decides whether/when
+to respond, whichever of "work finished," "work threw," or "cap tripped"
+happens first.
+
+**Verified two ways before writing it into the real routes**, same
+standard as the DNS-lookup and seller-trust fixes above: (1)
+`renderRequestGuard.test.mjs`, an isolated, zero-dependency offline
+reproduction of the exact hang this guards against (a promise that never
+resolves on its own) -- confirms the cap fires exactly once, `onTimeout`
+cleanup runs, a late completion or late rejection of the abandoned work
+never causes a second response, and the fast/normal path is untouched when
+nothing hangs; (2) a real integration test against an actual Express server
+over real HTTP (not just a mocked `res` object) with a fake, controllable
+Puppeteer page standing in for Chrome (no browser available in this
+sandbox) -- confirms a real HTTP client gets a clean `504` (not a hung
+connection or a reset) when work hangs, the concurrency slot actually
+frees up afterward, and -- the scenario this whole fix exists to prevent
+-- the service keeps accepting and serving new requests normally after
+back-to-back hangs, instead of silently wedging shut. Both test files
+ship in this commit; both pass. `node --check` syntax-validated on every
+edited/new file.
+
+**Status and honest confidence level: fixed and verified offline; NOT yet
+deployed or live-retested.** This closes a real, confirmed-by-reading-the-
+code resource-starvation bug regardless of anything else, and is worth
+shipping on its own merits. What it does NOT yet prove is that this is the
+*complete* explanation for the specific Cloudflare-branded 502 page the
+client saw -- that still needs a live retest to close out fully, the same
+way the DNS-lookup bug needed real container logs rather than static
+reading alone. Once deployed: retest `GET /v1/render/pdf` against a normal
+page first (should now succeed, or fail with THIS service's own clean JSON
+error/504 instead of a raw Cloudflare page), then -- more importantly --
+against a deliberately slow-to-render page if one can be found or built,
+to actually exercise the hard cap for real and confirm the client gets a
+clean `504` end-to-end through Caddy and Cloudflare rather than a raw
+"Bad Gateway" page. If the Cloudflare-branded page still appears even
+after this fix, that's real evidence something Caddy/Cloudflare-side is
+*also* involved and needs the same live-log-access treatment the DNS bug
+got before this can be called fully closed.
 
 ## Routes and pricing
 

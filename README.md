@@ -1228,12 +1228,32 @@ matching the format the route actually requires. No change to
 `getX402SellerTrust()`'s own validation -- it was already doing the right
 thing by rejecting a bare domain; the manifest's example was just wrong.
 
-**Status:** fixed and syntax-checked in this commit. Not yet deployed or
-live-retested. Once deployed, re-run
-`GET /v1/x402/seller-trust/https%3A%2F%2Fexample.com` (or any other
-properly-encoded absolute URL) for real and confirm it settles cleanly --
-a smaller, more mechanical fix than the DNS-lookup one above, but it
-deserves the same real-money confirmation before calling it done.
+**Status:** fixed, deployed, and confirmed live in production. Retested
+for real after this second deploy (2026-09-05): `GET /v1/x402/seller-trust/https%3A%2F%2Fexample.com`
+settled cleanly with a real, on-chain-verified Solana payment (transaction
+`pu2jkZf6F9ruyd8wJF5v44XwzRz6pZgCzze5oyiEEAcBso311jNAYNyVv5sPEky7RiQco1AW2V8221MjuNWoCQk`)
+and returned a full, valid trust-score response (trustScore, verdict,
+bazaarListed, ipIntelligence, and the rest) -- not just a bare 200.
+`GET /v1/convert/heic-to-png` was retested the same pass too and settled
+cleanly again (transaction
+`5diQUYWDpnrmFW5MikrtfDkeSwhgwWnahjxPY7bwwLfTmnTVnvkf7t2G2p9wfxMsqvWMEhHcnZYMASqD5MVEjUsB`),
+reconfirming the DNS-lookup fix above survived this second redeploy too.
+Both known Solana bugs from this project's first full paid test pass are
+now confirmed fixed in live production, not just in code.
+
+One implementation detail worth recording rather than "fixing" again: the
+live manifest's own advertised `resource` URL for this route ends up
+double-percent-encoded (`https%253A%252F%252Fexample.com`, not the
+single-encoded `https%3A%2F%2Fexample.com` this fix's `pathParams` value
+alone would suggest), because `substitutePathParams()` in `server.js`
+also runs `encodeURIComponent()` on top when building that field. That's
+not a new bug: this route's own handler decodes twice (once
+automatically via Express's route-param parsing, once explicitly via its
+own `decodeURIComponent(req.params.encodedUrl)` call), so a
+double-encoded path is exactly what a correct caller needs to supply --
+confirmed by this retest actually settling and returning real data.
+Left as-is: touching either the double-encode or the double-decode side
+alone would break the other.
 
 **Separately diagnosed this same pass, NOT fixed here -- left TBD
 deliberately:** `GET /v1/render/pdf` failed live with a ~20.3-second-long

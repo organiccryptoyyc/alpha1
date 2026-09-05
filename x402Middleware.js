@@ -1124,7 +1124,23 @@ export const routes = {
     accepts: multiNetworkAccepts(0.23),
     description: "Trust score for an x402 seller.",
     extensions: declareDiscoveryExtension({
-      pathParams: { encodedUrl: "example.com" },
+      // BUG FIX (2026-09-05): this was the bare string "example.com" -- not a
+      // valid absolute URL, and not percent-encoded either, despite the route
+      // handler's own comment above (server.js) requiring callers to
+      // encodeURIComponent() a full "https://..." seller base URL as this
+      // path segment. getX402SellerTrust() correctly rejects a bare domain
+      // with `new URL(trimmed)` throwing (it needs a real scheme+port, since
+      // a seller can run on a non-default port like this box's own :8443 --
+      // that's also why this can't just be "fixed" by defaulting to https://
+      // in dataSources.js instead: that would silently assume port 443 for
+      // every seller, which is wrong for at least this box). Confirmed live:
+      // both the manifest's own advertised example and a real paid test call
+      // against it hit this exact throw (captured from this container's own
+      // logs -- "Error: baseUrl must be a valid absolute URL, e.g.
+      // https://example.com:8443" at dataSources.js's getX402SellerTrust) --
+      // this was a separate, pre-existing discovery-metadata bug, unrelated
+      // to the DNS-lookup dispatcher fix elsewhere in this file's history.
+      pathParams: { encodedUrl: encodeURIComponent("https://example.com") },
       pathParamsSchema: {
         properties: { encodedUrl: { type: "string", description: "Encoded seller URL" } },
         required: ["encodedUrl"],

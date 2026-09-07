@@ -76,6 +76,56 @@ getChainSnapshot,
 
 const app = express();
 
+// PATCH (2026-09-07): fix for a real bug found during live-payment testing --
+// a payment that failed facilitator verification (VerifyError, Solana
+// simulation failure) could reach a paying caller as a raw HTML error page
+// client-side ("Unexpected token '<'... is not valid JSON") instead of any
+// JSON this app controls, with zero record of it in this app's own
+// centralized error handler below.
+//
+// Root cause, established by reading @x402/express@2.25.0's actual source
+// (not guessed): every path INSIDE paymentMiddleware's returned handler --
+// processHTTPRequest, processSettlement, the route handler thrown via
+// next(error) -- is already wrapped in its own try/catch and always resolves
+// to res.json(...)/res.send(...). None of that can produce raw HTML. So the
+// HTML wasn't coming from this app's own response logic at all: with zero
+// process.on('unhandledRejection'/'uncaughtException') handlers registered
+// anywhere in this file, a promise rejecting outside any request-scoped
+// await chain -- plausible somewhere inside the CDP facilitator SDK's own
+// internals, several layers below CdpV1CompatFacilitatorClient.verify() in
+// x402Middleware.js, which only sees and rethrows what already reached it --
+// hits Node's default handling and kills the whole process. The socket
+// drops mid-request, and Caddy (this app's own reverse proxy, per
+// docker-compose.yml) serves ITS OWN default error page for the broken
+// upstream connection -- real HTML, from a process that isn't this one.
+// That also explains why the VerifyError's logged stack trace was missing
+// Express's Layer.handle/Route.dispatch frames: it was never routed through
+// Express at all, and why the container looked healthy again for the very
+// next test -- Docker's restart policy brought the crashed process back up.
+//
+// Fix: log and keep running instead of letting Node's default behavior
+// (crash) apply. Deliberately chosen over the more textbook "log then
+// process.exit(1) and let the container restart" -- this app holds no
+// mutable state that a stray exception elsewhere could plausibly corrupt
+// (the NodeCache instances used for response caching are independent,
+// resilient in-memory maps, not a shared transaction/session store), so
+// keeping the process up protects every OTHER in-flight and future request
+// from being punished for one buyer's failed payment. If a future incident
+// ever suggests real state corruption instead of an isolated rejection,
+// that tradeoff should be revisited.
+process.on("unhandledRejection", (reason) => {
+  console.error(
+    "[process] unhandled rejection (kept process alive):",
+    reason && reason.stack ? reason.stack : reason
+  );
+});
+process.on("uncaughtException", (err) => {
+  console.error(
+    "[process] uncaught exception (kept process alive):",
+    err && err.stack ? err.stack : err
+  );
+});
+
 // Caddy sits in front of this app and terminates TLS, forwarding decrypted
 // traffic over the docker network with X-Forwarded-Proto: https. Without
 // this line, Express ignores that header and req.protocol falls back to

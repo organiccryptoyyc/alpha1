@@ -22,6 +22,7 @@ the Pi-measured data this stack already collects.
 
 import json
 import os
+import traceback
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pandas as pd
@@ -42,15 +43,39 @@ def load_model():
 
 
 def run_forecast(series, horizon, quantiles):
-    """series: list of {"timestamp": ISO-8601 string, "value": number}, oldest first."""
+    """series: list of {"timestamp": ISO-8601 string, "value": number}, oldest first.
+
+    PATCH (fix for "Cannot change data-type for array of references"): the
+    incoming timestamps are ISO-8601 strings ending in "Z" (see
+    edgeDataSource.js's callChronosForecast, which uses
+    `new Date(b.ts).toISOString()`). pandas parses a "Z"-suffixed string as a
+    tz-AWARE UTC timestamp, not a naive one -- confirmed live against the
+    real deployment, where every real (non-empty) rpc-forecast/rpc-anomaly
+    call was failing with exactly this numpy casting error, which is a known
+    symptom of tz-aware datetime64 arrays hitting code that assumes a plain
+    naive datetime64 buffer. `.tz_localize(None)` below drops the tz label
+    while keeping the same UTC wall-clock instants (order/spacing is all the
+    model needs) -- explicit `.astype(...)` calls on target/item_id are
+    added as cheap insurance against the same class of dtype mismatch
+    (object vs pandas' newer string/Arrow-backed dtypes) that's a documented
+    issue elsewhere in this library (amazon-science/chronos-forecasting#440).
+    """
+    timestamps = pd.to_datetime([p["timestamp"] for p in series], utc=True).tz_localize(None)
     df = pd.DataFrame(
         {
-            "timestamp": pd.to_datetime([p["timestamp"] for p in series]),
-            "target": [p["value"] for p in series],
+            "timestamp": timestamps,
+            "target": pd.array([float(p["value"]) for p in series], dtype="float64"),
         }
     )
-    df["item_id"] = "series"
-    pred_df = _pipeline.predict_df(df, prediction_length=horizon, quantile_levels=quantiles)
+    df["item_id"] = pd.array(["series"] * len(series), dtype="object")
+    try:
+        pred_df = _pipeline.predict_df(df, prediction_length=horizon, quantile_levels=quantiles)
+    except Exception:
+        # full traceback to the log (not just str(exc)) -- if this fix is
+        # incomplete, the next failure should be diagnosable from logs alone
+        # instead of another guess-and-redeploy round trip.
+        traceback.print_exc()
+        raise
     return json.loads(pred_df.to_json(orient="records"))
 
 

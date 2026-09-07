@@ -17,7 +17,7 @@ import { buildX402Middleware, routes } from "./x402Middleware.js";
 import { allowlistMiddleware } from "./allowlist.js";
 import { edgeStore } from "./edgeStore.js";
 import { registerEdgeIngestRoute } from "./edgeIngestRoute.js";
-import { getEdgeRpcPulse, getEdgeRpcPerformance } from "./edgeDataSource.js";
+import { getEdgeRpcPulse, getEdgeRpcPerformance, getEdgeRpcForecast, getEdgeRpcAnomaly } from "./edgeDataSource.js";
 import {
   getEthGasPrice,
   getEthLatestBlock,
@@ -1115,6 +1115,37 @@ app.get("/v1/edge/rpc-performance/:chain", async (req, res, next) => {
     if (result === null) {
       return res.status(400).json({ error: "invalid window -- use one of: 1h, 6h, 24h, 7d" });
     }
+    res.json(result);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// PATCH: rpc-forecast / rpc-anomaly -- paid (see routes catalog in
+// x402Middleware.js), unlike rpc-pulse/rpc-performance above which are free.
+// Both require ?provider= since a forecast is only meaningful for one
+// provider's series at a time; see getEdgeRpcForecast/getEdgeRpcAnomaly in
+// edgeDataSource.js for the "provider required" error shape.
+app.get("/v1/edge/rpc-forecast/:chain", async (req, res, next) => {
+  try {
+    const { chain } = req.params;
+    const { provider, vantage, horizon } = req.query;
+    const result = await getEdgeRpcForecast(chain, {
+      provider,
+      vantage,
+      horizon: horizon !== undefined ? Number(horizon) : undefined,
+    });
+    res.json(result);
+  } catch (err) {
+    next(err);
+  }
+});
+
+app.get("/v1/edge/rpc-anomaly/:chain", async (req, res, next) => {
+  try {
+    const { chain } = req.params;
+    const { provider, vantage } = req.query;
+    const result = await getEdgeRpcAnomaly(chain, { provider, vantage });
     res.json(result);
   } catch (err) {
     next(err);

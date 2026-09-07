@@ -1,13 +1,25 @@
 // edgeStore.js -- server-side store for Pi-measured RPC/gateway telemetry.
 //
 // Same discipline as the OFAC route already in this project: a plain
-// in-process array, loaded from disk at boot, no DB engine. At this volume
-// (one Pi, a handful of endpoints, 30s probe interval -> a few thousand
-// rows/day) that's genuinely enough; a real time-series DB is future work if
-// call volume or vantage-point count ever justifies it, not a v1 requirement.
-// This file owns exactly one concern: store measurements, answer two
-// questions about them (latest, and aggregated-over-a-window). Nothing here
-// is x402-aware or Express-aware -- see edgeIngestRoute.js and
+// in-process array, loaded from disk at boot, no DB engine. At the
+// original volume this was sized for (one Pi, a handful of endpoints, 30s
+// probe interval -> a few thousand rows/day, 30 days retention -> roughly
+// 100-150K records resident) that's genuinely enough.
+//
+// PATCH (retention 30 -> 400 days, added alongside chronos-forecast): at a
+// few thousand rows/day, 400 days puts resident record count in the low
+// millions rather than ~150K -- still fine for one process on this box (8
+// cores / 16.5GB), but it moves closer to the ceiling this comment already
+// flagged. The trigger for actually migrating to a real time-series DB
+// isn't 400 days by itself, it's 400 days *combined* with the planned
+// network-expansion phase (more contributor Pis = more vantage points =
+// multiplied row count) -- worth re-checking _debugRecordCount() and this
+// process's RSS after a few weeks at the new retention, and definitely
+// before onboarding outside vantage points.
+//
+// This file owns exactly one concern: store measurements, answer questions
+// about them (latest, aggregated-over-a-window, and bucketed-time-series).
+// Nothing here is x402-aware or Express-aware -- see edgeIngestRoute.js and
 // edgeDataSource.js for those layers.
 
 import { existsSync, mkdirSync } from "node:fs";
@@ -159,11 +171,49 @@ export function createEdgeStore({ filePath, retentionMs, trimIntervalMs = 60 * 6
     return results;
   }
 
+  /**
+   * Time-bucketed history for one (chain, provider[, vantage]) combination --
+   * feeds the forecast/anomaly endpoints (see edgeDataSource.js). Same
+   * per-bucket stats as performance() above, sliced into fixed-width buckets
+   * across the store's retention window instead of one aggregate for a
+   * single trailing window. maxBuckets bounds how much history a single
+   * call hands to the Chronos-2 sidecar, independent of EDGE_RETENTION_DAYS
+   * -- retention controls how much we keep, this controls how much of that
+   * one call is allowed to read.
+   */
+  function timeSeries({ chain, provider, vantage = null, bucketMs = 60 * 60 * 1000, maxBuckets = 2000 }) {
+    const matches = records.filter(
+      (r) => r.chain === chain && r.provider === provider && (!vantage || r.vantage === vantage)
+    );
+    if (matches.length === 0) return [];
+
+    const byBucket = new Map();
+    for (const r of matches) {
+      const bucketTs = Math.floor(r.ts / bucketMs) * bucketMs;
+      if (!byBucket.has(bucketTs)) byBucket.set(bucketTs, []);
+      byBucket.get(bucketTs).push(r);
+    }
+
+    return [...byBucket.entries()]
+      .sort((a, b) => a[0] - b[0])
+      .slice(-maxBuckets)
+      .map(([ts, samples]) => {
+        const successes = samples.filter((s) => s.success);
+        const latencies = successes.map((s) => s.latencyMs).filter((v) => typeof v === "number");
+        return {
+          ts,
+          avgLatencyMs: latencies.length ? Math.round(latencies.reduce((a, b) => a + b, 0) / latencies.length) : null,
+          successRate: +(successes.length / samples.length).toFixed(4),
+          sampleCount: samples.length,
+        };
+      });
+  }
+
   loadFromDisk();
   const trimTimer = setInterval(trim, trimIntervalMs);
   trimTimer.unref?.();
 
-  return { append, latest, performance, trim, _debugRecordCount: () => records.length };
+  return { append, latest, performance, timeSeries, trim, _debugRecordCount: () => records.length };
 }
 
 // Module-level singleton, same pattern as `const cache = new NodeCache(...)`
@@ -173,5 +223,8 @@ export function createEdgeStore({ filePath, retentionMs, trimIntervalMs = 60 * 6
 // matching every other constant in dataSources.js (e.g. ETH_RPC_URL).
 export const edgeStore = createEdgeStore({
   filePath: process.env.EDGE_DATA_PATH || "./data/edge-measurements.ndjson",
-  retentionMs: (Number(process.env.EDGE_RETENTION_DAYS) || 30) * 24 * 60 * 60 * 1000,
+  // Code-level fallback bumped 30 -> 400 alongside the Portainer stack
+  // variable of the same name, so an unset env var lands on the new
+  // intended steady-state rather than silently reverting to the old one.
+  retentionMs: (Number(process.env.EDGE_RETENTION_DAYS) || 400) * 24 * 60 * 60 * 1000,
 });

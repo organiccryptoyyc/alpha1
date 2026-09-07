@@ -1,0 +1,75 @@
+--- alpha1-src/x402Middleware.js	2026-09-07 16:17:33.310495205 +0000
++++ alpha1-patch/x402Middleware.js	2026-09-07 16:23:25.946487139 +0000
+@@ -1887,6 +1887,72 @@
+       },
+     }),
+   },
++  // PATCH: backed by a locally-run Chronos-2 model (see chronos-forecast.py)
++  // rather than a plain read of stored measurements like rpc-pulse/
++  // rpc-performance above -- priced above both of those (0.015 / 0.045) to
++  // reflect the actual inference cost, same "adjust once you have real
++  // usage data" note as the rest of this file.
++  "GET /v1/edge/rpc-forecast/:chain": {
++    accepts: multiNetworkAccepts(0.06),
++    description:
++      "Quantile latency forecast (10th/50th/90th percentile, next N hours) for one RPC/gateway provider on a chain, built from this project's own historical vantage-point measurements via a locally-run Chronos-2 time-series model. Requires ?provider=; optional &vantage= and &horizon= (hours, default 12, max 168).",
++    extensions: declareDiscoveryExtension({
++      pathParams: { chain: "eth" },
++      pathParamsSchema: {
++        properties: {
++          chain: { type: "string", description: "Chain id as configured on the collector, e.g. eth, sol, pokt" },
++        },
++        required: ["chain"],
++      },
++      queryParams: {
++        properties: {
++          provider: { type: "string", description: "Required -- which provider's series to forecast (e.g. llamarpc)" },
++          vantage: { type: "string", description: "Optional -- filter to one vantage point" },
++          horizon: { type: "string", description: "Hours ahead to forecast, 1-168 (default 12)" },
++        },
++        required: ["provider"],
++      },
++      output: {
++        example: {
++          chain: "eth",
++          provider: "llamarpc",
++          bucketed: "1h",
++          horizon: 12,
++          forecast: [{ timestamp: "2026-09-08T00:00:00.000Z", "0.1": 210, "0.5": 240, "0.9": 290 }],
++        },
++      },
++    }),
++  },
++  "GET /v1/edge/rpc-anomaly/:chain": {
++    accepts: multiNetworkAccepts(0.05),
++    description:
++      "Flags whether the most recent measured latency for one RPC/gateway provider on a chain falls outside its Chronos-2-predicted expected range -- same model backing rpc-forecast above. Requires ?provider=; optional &vantage=.",
++    extensions: declareDiscoveryExtension({
++      pathParams: { chain: "eth" },
++      pathParamsSchema: {
++        properties: {
++          chain: { type: "string", description: "Chain id as configured on the collector, e.g. eth, sol, pokt" },
++        },
++        required: ["chain"],
++      },
++      queryParams: {
++        properties: {
++          provider: { type: "string", description: "Required -- which provider's series to evaluate (e.g. llamarpc)" },
++          vantage: { type: "string", description: "Optional -- filter to one vantage point" },
++        },
++        required: ["provider"],
++      },
++      output: {
++        example: {
++          chain: "eth",
++          provider: "llamarpc",
++          anomaly: false,
++          latest: { measuredAt: "2026-09-07T23:00:00.000Z", avgLatencyMs: 245 },
++          expectedRange: { low: 210, high: 290 },
++        },
++      },
++    }),
++  },
+ };
+ 
+ 

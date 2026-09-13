@@ -1371,7 +1371,25 @@ export async function getUprockFetch(targetUrl) {
     throw new Error("url must not target a localhost, private, or link-local address");
   }
 
-  const { jobId, result } = await uprockCrawl(parsed.toString());
+  // FIX (2026-09-13): this route was seen live returning a raw, Cloudflare-
+  // branded "502: Bad Gateway" HTML page instead of JSON. That exact
+  // signature -- a connection held open for ~18-20s with no bytes flowing,
+  // then a Cloudflare-branded (not Cloudflare-524-timeout) 502 -- is the
+  // same mechanism already root-caused for /v1/render/pdf in the
+  // "Caddy/Cloudflare 502 mechanism" section of this file's README: this
+  // box's home router silently drops a long-idle proxied connection during
+  // the ~18-20s window, invisible to both Caddy's and this app's own logs,
+  // and outside this repo's control (confirmed there via a completely
+  // silent Caddy log at the exact failure timestamp). uprockCrawl()'s
+  // default maxWaitMs (20000ms) sits squarely inside that danger window on
+  // every call, even though UpRock's own crawl typically completes in a few
+  // seconds (see uprockCrawl's own comment above). Capping it well clear of
+  // the observed 18-20s drop point means a slow crawl now fails fast with
+  // this app's own clean JSON error instead of dangling near the router's
+  // NAT timeout -- it doesn't eliminate the router-level issue (nothing in
+  // this repo can), but it keeps normal-length crawls unaffected while
+  // taking this specific route out of the danger window.
+  const { jobId, result } = await uprockCrawl(parsed.toString(), { maxWaitMs: 12000 });
   // readerContent is UpRock's cleaned "reader mode" extraction (ads/nav
   // stripped); fall back to raw body if a given page didn't produce one.
   // Capped at 20k chars so one giant page doesn't blow up the response.
@@ -1981,6 +1999,36 @@ async function fetchSellerManifest(baseUrl) {
 const SELLER_TRUST_PROBE_TIMEOUT_MS = 4000;
 const SELLER_TRUST_PROBE_MAX = 3;
 
+// BUG FIX (2026-09-13): x402 v2 (the version this whole server itself runs,
+// per x402Middleware.js) puts the payment-required payload -- including
+// `accepts` -- ONLY in the base64-encoded `PAYMENT-REQUIRED` response
+// header, never in the JSON body. That's not a guess: it's what
+// @x402/core's own server code does (createHTTPPaymentRequiredResponse's
+// own comment literally says "v1 puts in body, v2 puts in header"), and an
+// unpaid 402 from this server's own paymentMiddleware returns body `{}`.
+// probeSellerResource() used to check `body?.accepts` alone, so it ALWAYS
+// reported hasAcceptsArray:false against any v2 seller -- including this
+// server's own routes -- even when the 402 was perfectly well-formed. That
+// produced exactly the bug seen live: scoringReasons said "0/3 probed
+// resource(s) returned a live 402 paywall" while resourcesProbed's own
+// per-resource is402 was true for all three, because the reasons text is
+// built from the SAME `conformant` count this function silently under-
+// reported. Fix: decode the PAYMENT-REQUIRED header (same
+// base64(JSON.stringify(...)) shape @x402/core's own
+// encodePaymentRequiredHeader/decodePaymentRequiredHeader use -- confirmed
+// directly against the installed @x402/core package, not assumed) and use
+// its `accepts` array, falling back to the JSON body for a v1-style seller
+// that still puts accepts there.
+function decodeAcceptsFromPaymentRequiredHeader(headerValue) {
+  if (!headerValue) return null;
+  try {
+    const decoded = JSON.parse(Buffer.from(headerValue, "base64").toString("utf8"));
+    return Array.isArray(decoded?.accepts) ? decoded.accepts : null;
+  } catch {
+    return null;
+  }
+}
+
 async function probeSellerResource(url) {
   let parsed;
   try {
@@ -1999,11 +2047,20 @@ async function probeSellerResource(url) {
     const responseTimeMs = Date.now() - start;
     let hasAcceptsArray = false;
     if (res.status === 402) {
-      try {
-        const body = await res.json();
-        hasAcceptsArray = Array.isArray(body?.accepts) && body.accepts.length > 0;
-      } catch {
-        hasAcceptsArray = false;
+      // Check the x402 v2 header first (see fix note above), then fall
+      // back to the JSON body for a v1-style seller.
+      const headerAccepts = decodeAcceptsFromPaymentRequiredHeader(
+        res.headers.get("payment-required")
+      );
+      if (headerAccepts && headerAccepts.length > 0) {
+        hasAcceptsArray = true;
+      } else {
+        try {
+          const body = await res.json();
+          hasAcceptsArray = Array.isArray(body?.accepts) && body.accepts.length > 0;
+        } catch {
+          hasAcceptsArray = false;
+        }
       }
     }
     return {
@@ -3223,12 +3280,33 @@ function periodLabel(fact) {
 }
 
 function pickLatestFact(factsForConcept, formFilter) {
-  // Picks the most-recently-filed entry matching formFilter (10-K or 10-Q),
-  // since restated/duplicate values for the same period are common in XBRL
-  // and the latest filing is the one most likely to be accurate.
+  // BUG FIX (2026-09-13): this used to sort purely by `filed` date and take
+  // the first entry. That's wrong for any concept whose XBRL history
+  // includes multi-year comparatives -- which SEC's companyfacts API always
+  // does for income-statement concepts (a 10-K's income statement typically
+  // shows the current year AND the prior two years side by side, each
+  // tagged with the SAME concept and the SAME `filed` date, since they all
+  // come from one accession). Sorting by `filed` alone leaves those same-
+  // filed-date entries in whatever order SEC's API happened to return them,
+  // not necessarily the most recent reporting period -- confirmed live: a
+  // real AAPL lookup returned netIncome/epsBasic/epsDiluted/
+  // stockholdersEquity correctly labeled with the latest fiscalYear/filed
+  // date but a stale `period` two years old, while totalAssets/
+  // totalLiabilities/cashAndEquivalents (balance-sheet concepts, which SEC
+  // filings typically only show 2 years of comparatives for, not 3) picked
+  // the right one by coincidence of array order.
+  //
+  // Fix: sort primarily by the fact's own reporting-period end date (`end`)
+  // descending -- that's what "most recent data" actually means -- and only
+  // fall back to `filed` date as a tiebreaker for genuine duplicates/
+  // restatements of the exact same period.
   const candidates = factsForConcept.filter((f) => formFilter.includes(f.form));
   if (!candidates.length) return null;
-  candidates.sort((a, b) => new Date(b.filed) - new Date(a.filed));
+  candidates.sort((a, b) => {
+    const endDiff = new Date(b.end) - new Date(a.end);
+    if (endDiff !== 0) return endDiff;
+    return new Date(b.filed) - new Date(a.filed);
+  });
   return candidates[0];
 }
 
@@ -3730,6 +3808,15 @@ const DEFILLAMA_CHAIN_NAME = {
 
 const YIELD_ENTRY_GAS_UNITS = 150000; // rough single swap/stake tx estimate, documented as approximate below
 const YIELD_DUST_THRESHOLD_USD = 1;
+// FIX (2026-09-13): live-tested against a real whale address (~9.19M SOL,
+// ~$934M) and got mathematically-correct but absurd-looking projected
+// 12-month earnings in the billions -- not a math bug (the APY multiplication
+// and disclaimers are all correct), but a response like that reads as
+// synthetic/broken to anyone glancing at it, screenshot or demo included.
+// This flags (never blocks or alters) any candidate above a threshold no
+// realistic retail wallet would cross, so a consumer of the data knows
+// they've hit a genuine outlier rather than assuming the route is broken.
+const YIELD_OUTLIER_WALLET_USD_THRESHOLD = 1_000_000;
 
 const YIELD_DISCLAIMER =
   "Informational only, not financial advice. APY figures are live snapshots from DefiLlama and change constantly -- projected earnings assume the current rate holds for the full period and are not guaranteed. Gas cost is a rough single-swap estimate (150,000 gas units at current gas price); actual cost depends on the specific protocol/route used. Smart-contract risk, impermanent-loss risk (for LP pools), and price risk on the underlying assets all apply. You are responsible for executing and accepting any resulting transaction.";
@@ -3793,6 +3880,7 @@ async function rankedYieldCandidatesForChain(slug, balanceUsd, nativeSymbol, bal
       projected12moEarningsNative:
         priceUsd && projected12moUsd != null ? projected12moUsd / priceUsd : null,
       projectedReturnNote: `~${apy.toFixed(2)}% APY at current live rate (not compounded, not guaranteed)`,
+      outlierWallet: balanceUsd != null && balanceUsd >= YIELD_OUTLIER_WALLET_USD_THRESHOLD,
       estGasCostToEnter: {
         gasUnits: YIELD_ENTRY_GAS_UNITS,
         native: gasCostNative,
@@ -3882,6 +3970,7 @@ export async function getYieldOpportunities(addressRaw) {
   const candidates = perChainCandidates.flat();
   candidates.sort((a, b) => (b.projected12moEarningsUsd || 0) - (a.projected12moEarningsUsd || 0));
   const topOpportunities = candidates.slice(0, 3).map((c, i) => ({ rank: i + 1, ...c }));
+  const outlierWalletDetected = topOpportunities.some((c) => c.outlierWallet);
 
   return {
     source: "yield-opportunities",
@@ -3894,6 +3983,10 @@ export async function getYieldOpportunities(addressRaw) {
       balanceUsd: c.balanceUsd,
     })),
     topOpportunities,
+    outlierWalletDetected,
+    ...(outlierWalletDetected && {
+      outlierWalletNote: `Wallet balance on at least one chain is at or above $${YIELD_OUTLIER_WALLET_USD_THRESHOLD.toLocaleString("en-US")} -- projected earnings figures are mathematically correct but reflect an unusually large holder, not a typical retail wallet.`,
+    }),
     disclaimer: YIELD_DISCLAIMER,
     fetchedAt: new Date().toISOString(),
   };
@@ -3966,6 +4059,7 @@ export async function getYieldOpportunitiesSolana(solAddressRaw) {
       projected12moEarningsNative:
         priceUsd && projected12moUsd != null ? projected12moUsd / priceUsd : null,
       projectedReturnNote: `~${apy.toFixed(2)}% APY at current live rate (not compounded, not guaranteed)`,
+      outlierWallet: balanceUsd != null && balanceUsd >= YIELD_OUTLIER_WALLET_USD_THRESHOLD,
       estGasCostToEnter: { note: "negligible -- typical Solana tx fee is ~$0.00025", usd: 0.00025 },
       ilRisk: pool.ilRisk,
       stablecoin: pool.stablecoin,
@@ -3973,6 +4067,7 @@ export async function getYieldOpportunitiesSolana(solAddressRaw) {
   });
   candidates.sort((a, b) => (b.projected12moEarningsUsd || 0) - (a.projected12moEarningsUsd || 0));
   const topOpportunities = candidates.slice(0, 3).map((c, i) => ({ rank: i + 1, ...c }));
+  const outlierWalletDetected = topOpportunities.some((c) => c.outlierWallet);
 
   return {
     source: "yield-opportunities-solana",
@@ -3980,6 +4075,10 @@ export async function getYieldOpportunitiesSolana(solAddressRaw) {
     balance,
     balanceUsd,
     topOpportunities,
+    outlierWalletDetected,
+    ...(outlierWalletDetected && {
+      outlierWalletNote: `Wallet balance is at or above $${YIELD_OUTLIER_WALLET_USD_THRESHOLD.toLocaleString("en-US")} -- projected earnings figures are mathematically correct but reflect an unusually large holder, not a typical retail wallet.`,
+    }),
     disclaimer: YIELD_DISCLAIMER,
     fetchedAt: new Date().toISOString(),
   };
@@ -3997,6 +4096,7 @@ export async function getYieldOpportunitiesCombined(addressRaw, solAddressRaw) {
   const allCandidates = [...(evmResult.topOpportunities || []), ...(solResult.topOpportunities || [])];
   allCandidates.sort((a, b) => (b.projected12moEarningsUsd || 0) - (a.projected12moEarningsUsd || 0));
   const topOpportunities = allCandidates.slice(0, 3).map((c, i) => ({ ...c, rank: i + 1 }));
+  const outlierWalletDetected = topOpportunities.some((c) => c.outlierWallet);
 
   return {
     source: "yield-opportunities-combined",
@@ -4008,6 +4108,10 @@ export async function getYieldOpportunitiesCombined(addressRaw, solAddressRaw) {
     solBalanceUsd: solResult.balanceUsd ?? null,
     solError: solResult.error,
     topOpportunities,
+    outlierWalletDetected,
+    ...(outlierWalletDetected && {
+      outlierWalletNote: `Wallet balance is at or above $${YIELD_OUTLIER_WALLET_USD_THRESHOLD.toLocaleString("en-US")} on at least one chain -- projected earnings figures are mathematically correct but reflect an unusually large holder, not a typical retail wallet.`,
+    }),
     disclaimer: YIELD_DISCLAIMER,
     fetchedAt: new Date().toISOString(),
   };
